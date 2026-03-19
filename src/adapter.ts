@@ -180,19 +180,48 @@ export class DocumentAdapter {
     where?: Where
     id?: string
   }): Promise<({ id: Sqid } & Record<string, unknown>) | null> {
+    const ns = this.nsResolver.getById(args.ns)
     let row: DataRow | null = null
 
     if (args.id) {
       const { id } = fromSqid(args.id)
+      // Try the current namespace first
       row = await findOneData(this.pool as unknown as pg.Pool, { ns: args.ns, id })
+      // In a branch: if not found by parent id, check for forked doc or fall through to parent
+      if (!row && ns?.parent) {
+        // Look for a forked doc with _parent pointing to this id
+        const forked = await query<DataRow>(
+          this.pool as unknown as pg.Pool,
+          `SELECT * FROM data WHERE ns = $1 AND doc->>'_parent' = $2 LIMIT 1`,
+          [args.ns, String(id)],
+        )
+        if (forked.rows[0]) {
+          row = forked.rows[0]
+        } else {
+          // Fall through to parent
+          row = await findOneData(this.pool as unknown as pg.Pool, { ns: ns.parent, id })
+        }
+      }
     } else if (args.where) {
-      const result = await findData(this.pool as unknown as pg.Pool, {
-        ns: args.ns,
-        collection: args.collection,
-        where: args.where,
-        limit: 1,
-      })
-      row = result.rows[0] ?? null
+      // Use COW path for where queries in branches
+      if (ns?.parent) {
+        const result = await findDataCOW(this.pool as unknown as pg.Pool, {
+          ns: args.ns,
+          parent: ns.parent,
+          collection: args.collection,
+          where: args.where,
+          limit: 1,
+        })
+        row = result.rows[0] ?? null
+      } else {
+        const result = await findData(this.pool as unknown as pg.Pool, {
+          ns: args.ns,
+          collection: args.collection,
+          where: args.where,
+          limit: 1,
+        })
+        row = result.rows[0] ?? null
+      }
     }
 
     if (!row) return null
@@ -292,7 +321,8 @@ export class DocumentAdapter {
         body: extractBody(merged),
       })
 
-      return { id: this.rowToSqid(row), doc: merged }
+      const { _parent: _, ...cleanMerged } = merged
+      return { id: this.rowToSqid(row), doc: cleanMerged }
     })
   }
 

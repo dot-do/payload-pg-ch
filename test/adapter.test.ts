@@ -713,8 +713,14 @@ describe('COW branching', () => {
     // Branch sees modified version
     const branchPosts = await adapter.find({ ns: branchNsId, collection: 'posts' })
     expect(branchPosts.docs[0].title).toBe('Modified in Branch')
-    // _parent internal field must not leak to API
+    // _parent internal field must not leak to API (find, findOne, updateOne)
     expect(branchPosts.docs[0]._parent).toBeUndefined()
+
+    // findOne by sqid works in branch (even though forked doc has new id)
+    const branchFindOne = await adapter.findOne({ ns: branchNsId, collection: 'posts', id: parentPost.id })
+    expect(branchFindOne).not.toBeNull()
+    expect(branchFindOne!.title).toBe('Modified in Branch')
+    expect(branchFindOne!._parent).toBeUndefined()
 
     // Parent still sees original
     const parentPosts = await adapter.find({ ns: nsId, collection: 'posts' })
