@@ -72,6 +72,21 @@ export async function mergeBranch(
           `UPDATE data SET doc = $1, updated = now() WHERE ns = $2 AND id = $3`,
           [JSON.stringify(parsed), branch.parent, parentId],
         )
+        // Copy rels from branch to parent (replace old parent rels)
+        await query(tx, `DELETE FROM rels WHERE ns = $1 AND "from" = $2`, [branch.parent, parentId])
+        const branchRels = await query<{ to: number; path: string; sort: number; meta: unknown }>(
+          tx,
+          `SELECT "to", path, sort, meta FROM rels WHERE ns = $1 AND "from" = $2`,
+          [branchNsId, doc.id],
+        )
+        for (const rel of branchRels.rows) {
+          await query(
+            tx,
+            `INSERT INTO rels (ns, "from", "to", path, sort, meta) VALUES ($1, $2, $3, $4, $5, $6)
+             ON CONFLICT ("from", path, "to") DO UPDATE SET sort = $5, meta = $6`,
+            [branch.parent, parentId, rel.to, rel.path, rel.sort, rel.meta ? JSON.stringify(rel.meta) : null],
+          )
+        }
         // Log the merge update in parent ns for CDC
         await query(
           tx,
@@ -95,6 +110,19 @@ export async function mergeBranch(
            RETURNING id`,
           [branch.parent, doc.collection, doc.slug, JSON.stringify(parsed), doc.status, doc.locale, doc.rand, doc.created],
         )
+        // Copy rels from branch to parent for new doc
+        const branchRels = await query<{ to: number; path: string; sort: number; meta: unknown }>(
+          tx,
+          `SELECT "to", path, sort, meta FROM rels WHERE ns = $1 AND "from" = $2`,
+          [branchNsId, doc.id],
+        )
+        for (const rel of branchRels.rows) {
+          await query(
+            tx,
+            `INSERT INTO rels (ns, "from", "to", path, sort, meta) VALUES ($1, $2, $3, $4, $5, $6)`,
+            [branch.parent, newRow.rows[0].id, rel.to, rel.path, rel.sort, rel.meta ? JSON.stringify(rel.meta) : null],
+          )
+        }
         // Log the merge create in parent ns for CDC
         await query(
           tx,

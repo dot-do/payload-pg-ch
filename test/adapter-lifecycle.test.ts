@@ -139,6 +139,79 @@ describe('merge creates pending rows for search reindexing', () => {
   })
 })
 
+describe('merge preserves relationships', () => {
+  it('rels from branch are copied to parent on merge', async () => {
+    const nsResult = await query<{ id: number }>(
+      pool,
+      `INSERT INTO ns (uri, name, kind) VALUES ('merge-rels.test', 'Test', 'production') RETURNING id`,
+    )
+    const nsId = nsResult.rows[0].id
+
+    const adapter = new DocumentAdapter({ postgres: TEST_DB }, [
+      {
+        slug: 'posts',
+        prefix: 'pos',
+        fields: [
+          { name: 'title', type: 'text' },
+          { name: 'author', type: 'relationship', relationTo: 'users' },
+        ],
+      },
+      { slug: 'users', prefix: 'usr', fields: [{ name: 'name', type: 'text' }] },
+    ])
+    await adapter.nsResolver.refresh()
+
+    // Create user and post in parent
+    const user1 = await adapter.create({ ns: nsId, collection: 'users', data: { name: 'Alice' } })
+    const user2 = await adapter.create({ ns: nsId, collection: 'users', data: { name: 'Bob' } })
+    const user1Id = fromSqid(user1.id).id
+    const user2Id = fromSqid(user2.id).id
+
+    const post = await adapter.create({
+      ns: nsId,
+      collection: 'posts',
+      data: { title: 'Post', author: user1Id },
+    })
+    const postId = fromSqid(post.id).id
+
+    // Verify initial rel
+    const relsBefore = await query<{ to: number }>(
+      pool,
+      `SELECT "to" FROM rels WHERE ns = $1 AND "from" = $2 AND path = 'author'`,
+      [nsId, postId],
+    )
+    expect(relsBefore.rows[0].to).toBe(user1Id)
+
+    // Create branch, change author to Bob
+    const branch = await adapter.createBranch({
+      parent: nsId,
+      uri: 'merge-rels.test/pr/1',
+      branch: 'feat/change-author',
+    })
+    await adapter.nsResolver.refresh()
+
+    await adapter.updateOne({
+      ns: branch.id,
+      collection: 'posts',
+      id: post.id,
+      data: { title: 'Post', author: user2Id },
+    })
+
+    // Merge
+    await adapter.mergeBranch(branch.id)
+
+    // Parent rels should now point to user2
+    const relsAfter = await query<{ to: number }>(
+      pool,
+      `SELECT "to" FROM rels WHERE ns = $1 AND "from" = $2 AND path = 'author'`,
+      [nsId, postId],
+    )
+    expect(relsAfter.rows).toHaveLength(1)
+    expect(relsAfter.rows[0].to).toBe(user2Id)
+
+    await adapter.destroy()
+  })
+})
+
 describe('adapter with custom prefix config', () => {
   it('uses custom prefixes from config', async () => {
     const nsResult = await query<{ id: number }>(
