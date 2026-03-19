@@ -187,7 +187,7 @@ export async function findDataCOW(
       WHERE d.ns = $1 AND d.collection = $2
     ),
     tombstones AS (
-      SELECT (doc::jsonb->>'_parent')::bigint AS hidden
+      SELECT (doc->>'_parent')::bigint AS hidden
       FROM data
       WHERE ns = $1 AND collection = '_tombstone'
     ),
@@ -196,8 +196,8 @@ export async function findDataCOW(
       FROM data d
       WHERE d.ns = $3 AND d.collection = $2
         AND d.id NOT IN (
-          SELECT (doc::jsonb->>'_parent')::bigint
-          FROM data WHERE ns = $1 AND doc::jsonb->>'_parent' IS NOT NULL
+          SELECT (doc->>'_parent')::bigint
+          FROM data WHERE ns = $1 AND doc->>'_parent' IS NOT NULL
         )
         AND d.id NOT IN (SELECT hidden FROM tombstones)
     ),

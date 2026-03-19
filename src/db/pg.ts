@@ -1,6 +1,10 @@
 import pg from 'pg'
 
-const { Pool } = pg
+const { Pool, types } = pg
+
+// Parse BIGINT (OID 20) as number instead of string
+// Safe for IDs up to Number.MAX_SAFE_INTEGER (9007199254740991)
+types.setTypeParser(20, (val: string) => parseInt(val, 10))
 
 export type { Pool, PoolClient } from 'pg'
 

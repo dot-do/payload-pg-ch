@@ -218,17 +218,17 @@ export class DocumentAdapter {
     const fields = this.getFields(args.collection)
 
     return transaction(this.pool as unknown as pg.Pool, async (tx) => {
+      let workingId = intId
+
       // COW fork if in a branch
       if (ns?.parent) {
         const exists = await findOneData(tx, { ns: args.ns, id: intId })
         if (!exists) {
           const parentDoc = await findOneData(tx, { ns: ns.parent, id: intId })
           if (parentDoc) {
-            const forkedDoc = {
-              ...(typeof parentDoc.doc === 'string' ? JSON.parse(parentDoc.doc) : parentDoc.doc),
-              _parent: parentDoc.id,
-            }
-            await insertData(tx, {
+            const parentDocObj = typeof parentDoc.doc === 'string' ? JSON.parse(parentDoc.doc) : parentDoc.doc
+            const forkedDoc = { ...parentDocObj, _parent: parentDoc.id }
+            const forked = await insertData(tx, {
               ns: args.ns,
               collection: parentDoc.collection,
               slug: parentDoc.slug,
@@ -237,30 +237,31 @@ export class DocumentAdapter {
               locale: parentDoc.locale,
               rand: parentDoc.rand,
             })
+            workingId = forked.id
           }
         }
       }
 
       // Merge existing doc with updates
-      const current = await findOneData(tx, { ns: args.ns, id: intId })
+      const current = await findOneData(tx, { ns: args.ns, id: workingId })
       const currentDoc = current ? (typeof current.doc === 'string' ? JSON.parse(current.doc) : current.doc) : {}
       const merged = { ...currentDoc, ...args.data }
 
       const row = await updateData(tx, {
         ns: args.ns,
-        id: intId,
+        id: workingId,
         doc: merged,
         status: args.data.status as string | undefined,
         locale: args.data.locale as string | undefined,
       })
 
       // Rebuild relationships
-      await deleteRelsForEntity(tx, { ns: args.ns, from: intId })
+      await deleteRelsForEntity(tx, { ns: args.ns, from: workingId })
       const rels = extractRels(merged, fields)
       for (const rel of rels) {
         await insertRel(tx, {
           ns: args.ns,
-          from: intId,
+          from: workingId,
           to: rel.to,
           path: rel.path,
           sort: rel.sort,
@@ -271,7 +272,7 @@ export class DocumentAdapter {
       await insertLog(tx, {
         ns: args.ns,
         kind: 'data.updated',
-        entity: intId,
+        entity: workingId,
         collection: args.collection,
         actor: args.actor,
         doc: merged,
@@ -283,7 +284,7 @@ export class DocumentAdapter {
       // Pending for search reindex
       await insertPending(tx, {
         ns: args.ns,
-        entity: intId,
+        entity: workingId,
         collection: args.collection,
         title: merged.title as string | undefined,
         body: extractBody(merged),
@@ -303,16 +304,24 @@ export class DocumentAdapter {
     const ns = this.nsResolver.getById(args.ns)
 
     return transaction(this.pool as unknown as pg.Pool, async (tx) => {
-      const result = await findData(tx, {
-        ns: args.ns,
-        collection: args.collection,
-        where: args.where,
-      })
+      // Use COW read path if in a branch, so we see parent docs too
+      const result = ns?.parent
+        ? await findDataCOW(tx, {
+            ns: args.ns,
+            parent: ns.parent,
+            collection: args.collection,
+            where: args.where,
+          })
+        : await findData(tx, {
+            ns: args.ns,
+            collection: args.collection,
+            where: args.where,
+          })
 
       let deleted = 0
       for (const row of result.rows) {
         if (ns?.parent) {
-          // In a branch: write tombstone
+          // In a branch: write tombstone referencing the parent doc's id
           await insertData(tx, {
             ns: args.ns,
             collection: '_tombstone',

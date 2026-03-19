@@ -25,7 +25,7 @@ export function whereToSQL(
   function compileField(field: string, op: WhereField): string {
     const col = PROMOTED_COLUMNS.has(field)
       ? `${table}."${field}"`
-      : `${table}.doc::jsonb->>'${field}'`
+      : `${table}.doc->>'${field}'`
 
     const clauses: string[] = []
 
@@ -67,8 +67,8 @@ export function whereToSQL(
       } else {
         clauses.push(
           op.exists
-            ? `${table}.doc::jsonb ? '${field}'`
-            : `NOT (${table}.doc::jsonb ? '${field}')`,
+            ? `${table}.doc ? '${field}'`
+            : `NOT (${table}.doc ? '${field}')`,
         )
       }
     }

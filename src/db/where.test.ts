@@ -10,7 +10,7 @@ describe('whereToSQL', () => {
 
   it('compiles JSON path query for non-promoted field', () => {
     const result = whereToSQL({ title: { equals: 'Hello' } })
-    expect(result.sql).toContain("data.doc::jsonb->>'title' = $1")
+    expect(result.sql).toContain("data.doc->>'title' = $1")
     expect(result.params).toEqual(['Hello'])
   })
 
@@ -79,7 +79,7 @@ describe('whereToSQL', () => {
 
   it('compiles exists for JSON field', () => {
     const result = whereToSQL({ title: { exists: true } })
-    expect(result.sql).toContain("data.doc::jsonb ? 'title'")
+    expect(result.sql).toContain("data.doc ? 'title'")
   })
 
   it('handles empty where', () => {

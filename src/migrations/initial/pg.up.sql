@@ -46,27 +46,20 @@ CREATE TABLE data (
   ns            BIGINT NOT NULL REFERENCES ns(id),
   collection    TEXT NOT NULL,
   slug          TEXT,
-  doc           JSON NOT NULL,
+  doc           JSONB NOT NULL,
   status        TEXT,
   locale        TEXT,
   rand          INT NOT NULL,
   created       TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated       TIMESTAMPTZ NOT NULL DEFAULT now(),
-  embedding     vector(768),
-  search        JSONB GENERATED ALWAYS AS (
-    jsonb_build_object(
-      'title', doc::jsonb->>'title',
-      'tags',  doc::jsonb->'tags',
-      'type',  doc::jsonb->>'_type'
-    )
-  ) STORED
+  embedding     vector(768)
 );
 
 CREATE INDEX idx_data_ns ON data(ns);
 CREATE INDEX idx_data_collection ON data(ns, collection);
 CREATE INDEX idx_data_slug ON data(ns, collection, slug);
 CREATE INDEX idx_data_status ON data(status) WHERE status IS NOT NULL;
-CREATE INDEX idx_data_search ON data USING GIN (search);
+CREATE INDEX idx_data_doc ON data USING GIN (doc);
 CREATE INDEX idx_data_embedding ON data USING hnsw (embedding vector_cosine_ops)
   WITH (m = 16, ef_construction = 64);
 CREATE TABLE actions (
@@ -119,19 +112,27 @@ CREATE INDEX idx_rels_from ON rels("from", path);
 CREATE INDEX idx_rels_to ON rels("to");
 CREATE INDEX idx_rels_ns ON rels(ns);
 CREATE TABLE log (
-  id            BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-  ns            BIGINT NOT NULL REFERENCES ns(id),
+  id            BIGINT GENERATED ALWAYS AS IDENTITY,
+  ns            BIGINT NOT NULL,
   kind          TEXT NOT NULL,
   entity        BIGINT,
   collection    TEXT,
   actor         BIGINT,
-  doc           JSON,
-  diff          JSON,
-  meta          JSON,
+  doc           JSONB,
+  diff          JSONB,
+  meta          JSONB,
   commit        TEXT,
   rand          INT NOT NULL,
-  created       TIMESTAMPTZ NOT NULL DEFAULT now()
+  created       TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY (id, created)
 ) PARTITION BY RANGE (created);
+
+-- Create default partition to catch all data
+CREATE TABLE log_default PARTITION OF log DEFAULT;
+
+-- Create current month partition
+CREATE TABLE log_current PARTITION OF log
+  FOR VALUES FROM (date_trunc('month', now())) TO (date_trunc('month', now()) + interval '1 month');
 
 CREATE INDEX idx_log_ns ON log(ns);
 CREATE INDEX idx_log_entity ON log(entity);

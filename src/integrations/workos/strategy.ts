@@ -33,7 +33,7 @@ export function createAuthStrategy(pool: pg.Pool, config: WorkOSConfig) {
         const existing = await query<{ id: number; doc: string }>(
           pool,
           `SELECT id, doc FROM data
-           WHERE collection = 'users' AND doc::jsonb->>'workosId' = $1
+           WHERE collection = 'users' AND doc->>'workosId' = $1
            LIMIT 1`,
           [session.user.id],
         )

@@ -52,7 +52,7 @@ export async function mergeBranch(
     if (!branch.parent) throw new Error(`Cannot merge a root namespace`)
 
     // Get modified docs (excluding tombstones)
-    const docsResult = await query<{ id: number; doc: string; collection: string; slug: string | null; status: string | null; locale: string | null; rand: number; created: Date }>(
+    const docsResult = await query<{ id: number; doc: unknown; collection: string; slug: string | null; status: string | null; locale: string | null; rand: number; created: Date }>(
       tx,
       `SELECT id, doc, collection, slug, status, locale, rand, created FROM data WHERE ns = $1 AND collection != '_tombstone'`,
       [branchNsId],
@@ -60,7 +60,7 @@ export async function mergeBranch(
 
     let merged = 0
     for (const doc of docsResult.rows) {
-      const parsed = JSON.parse(doc.doc)
+      const parsed = typeof doc.doc === 'string' ? JSON.parse(doc.doc) : { ...doc.doc as Record<string, unknown> }
       const parentId = parsed._parent
       delete parsed._parent
 
@@ -76,7 +76,6 @@ export async function mergeBranch(
         await query(
           tx,
           `INSERT INTO data (ns, collection, slug, doc, status, locale, rand, created, updated)
-           OVERRIDING SYSTEM VALUE
            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, now())`,
           [branch.parent, doc.collection, doc.slug, JSON.stringify(parsed), doc.status, doc.locale, doc.rand, doc.created],
         )
@@ -85,14 +84,15 @@ export async function mergeBranch(
     }
 
     // Handle tombstones — delete from parent
-    const tombResult = await query<{ doc: string }>(
+    const tombResult = await query<{ doc: unknown }>(
       tx,
       `SELECT doc FROM data WHERE ns = $1 AND collection = '_tombstone'`,
       [branchNsId],
     )
     let deleted = 0
     for (const t of tombResult.rows) {
-      const { _parent } = JSON.parse(t.doc)
+      const tombDoc = typeof t.doc === 'string' ? JSON.parse(t.doc) : t.doc as Record<string, unknown>
+      const { _parent } = tombDoc
       if (_parent) {
         await query(tx, `DELETE FROM data WHERE ns = $1 AND id = $2`, [branch.parent, _parent])
         deleted++

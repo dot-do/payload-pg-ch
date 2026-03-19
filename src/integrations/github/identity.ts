@@ -44,7 +44,7 @@ export async function linkGitHubIdentity(
 ): Promise<void> {
   await query(
     pool,
-    `UPDATE data SET doc = jsonb_set(doc::jsonb, '{githubId}', $1::text::jsonb), updated = now()
+    `UPDATE data SET doc = jsonb_set(doc, '{githubId}', $1::text::jsonb), updated = now()
      WHERE id = $2 AND collection = 'users'`,
     [String(githubId), userId],
   )
