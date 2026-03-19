@@ -23,9 +23,6 @@ export async function insertSearch(
     tx,
     `INSERT INTO search (ns, entity, collection, version, title, body, tags, locale, meta, embedding)
      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-     ON CONFLICT (id) DO UPDATE SET
-       version = $4, title = $5, body = $6, tags = $7, locale = $8, meta = $9,
-       embedding = $10, updated = now()
      RETURNING *`,
     [
       args.ns,
@@ -37,7 +34,7 @@ export async function insertSearch(
       args.tags ?? [],
       args.locale ?? null,
       args.meta ? JSON.stringify(args.meta) : null,
-      args.embedding ?? null,
+      args.embedding ? `[${args.embedding.join(',')}]` : null,
     ],
   )
   return result.rows[0]

@@ -32,7 +32,7 @@ export async function insertData(
       args.status ?? null,
       args.locale ?? null,
       args.rand,
-      args.embedding ?? null,
+      formatVector(args.embedding),
     ],
   )
   return result.rows[0]
@@ -60,7 +60,7 @@ export async function updateData(
       JSON.stringify(args.doc),
       args.status ?? null,
       args.locale ?? null,
-      args.embedding ?? null,
+      formatVector(args.embedding),
       args.id,
       args.ns,
     ],
@@ -229,4 +229,9 @@ function sanitizeSort(sort: string): string {
   const col = match[1]
   const dir = match[2]?.toUpperCase() === 'ASC' ? 'ASC' : 'DESC'
   return `${col} ${dir}`
+}
+
+function formatVector(embedding: number[] | null | undefined): string | null {
+  if (!embedding) return null
+  return `[${embedding.join(',')}]`
 }
