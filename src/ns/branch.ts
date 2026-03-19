@@ -1,6 +1,7 @@
 import type pg from 'pg'
 import type { NsRow } from '../types.js'
 import { query, transaction } from '../db/pg.js'
+import { generateRand } from '../id/sqids.js'
 
 export interface CreateBranchArgs {
   parent: number
@@ -71,13 +72,30 @@ export async function mergeBranch(
           `UPDATE data SET doc = $1, updated = now() WHERE ns = $2 AND id = $3`,
           [JSON.stringify(parsed), branch.parent, parentId],
         )
-      } else {
-        // New document created in branch — insert into parent
+        // Log the merge update in parent ns for CDC
         await query(
           tx,
+          `INSERT INTO log (ns, kind, entity, collection, doc, meta, rand, created)
+           VALUES ($1, 'data.updated', $2, $3, $4, $5, $6, now())`,
+          [branch.parent, parentId, doc.collection, JSON.stringify(parsed),
+           JSON.stringify({ source: 'merge', branch: branchNsId }), generateRand()],
+        )
+      } else {
+        // New document created in branch — insert into parent
+        const newRow = await query<{ id: number }>(
+          tx,
           `INSERT INTO data (ns, collection, slug, doc, status, locale, rand, created, updated)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, now())`,
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, now())
+           RETURNING id`,
           [branch.parent, doc.collection, doc.slug, JSON.stringify(parsed), doc.status, doc.locale, doc.rand, doc.created],
+        )
+        // Log the merge create in parent ns for CDC
+        await query(
+          tx,
+          `INSERT INTO log (ns, kind, entity, collection, doc, meta, rand, created)
+           VALUES ($1, 'data.created', $2, $3, $4, $5, $6, now())`,
+          [branch.parent, newRow.rows[0].id, doc.collection, JSON.stringify(parsed),
+           JSON.stringify({ source: 'merge', branch: branchNsId }), generateRand()],
         )
       }
       merged++
@@ -95,6 +113,13 @@ export async function mergeBranch(
       const { _parent } = tombDoc
       if (_parent) {
         await query(tx, `DELETE FROM data WHERE ns = $1 AND id = $2`, [branch.parent, _parent])
+        // Log the merge delete in parent ns for CDC
+        await query(
+          tx,
+          `INSERT INTO log (ns, kind, entity, meta, rand, created)
+           VALUES ($1, 'data.deleted', $2, $3, $4, now())`,
+          [branch.parent, _parent, JSON.stringify({ source: 'merge', branch: branchNsId }), generateRand()],
+        )
         deleted++
       }
     }

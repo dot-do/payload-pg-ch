@@ -223,10 +223,9 @@ describe('E2E: Full content management workflow', () => {
 
     const kinds = allLogs.rows.map(r => r.kind)
 
-    // Should contain lifecycle events from direct adapter operations
-    // Note: merge writes raw SQL to parent, so merge changes don't generate
-    // data.updated logs in the parent ns — they're tracked in the branch ns
+    // Should contain all lifecycle events including merge operations
     expect(kinds).toContain('data.created')
+    expect(kinds).toContain('data.updated') // from merge
     expect(kinds).toContain('page.viewed')
     expect(kinds).toContain('search.query')
 
