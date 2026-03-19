@@ -5,19 +5,36 @@ const sqids = new Sqids({ minLength: 10 })
 
 // Collection slug → 3-char prefix registry
 const PREFIXES: Record<string, string> = {
-  posts: 'pos',
-  pages: 'pag',
-  users: 'usr',
+  // Core
+  nouns: 'nou', verbs: 'vrb', things: 'thn', 'action-defs': 'acd',
+  // Chat
+  chats: 'cht', messages: 'msg', votes: 'vot', documents: 'doc',
+  suggestions: 'sug', streams: 'stm',
+  // Agents
+  agents: 'agt', models: 'mdl', prompts: 'pmt', tools: 'tol',
+  memories: 'mem', 'agent-runs': 'arn', 'agent-sessions': 'asn',
+  // Code
+  functions: 'fun', workflows: 'wfl', packages: 'pkg', modules: 'mod',
+  components: 'cmp',
+  // Orchestration
+  issues: 'iss', projects: 'prj', goals: 'gol', approvals: 'apr',
+  comments: 'cmn',
+  // Identity
+  users: 'usr', organizations: 'org', teams: 'tam', roles: 'rol',
+  'api-keys': 'key', accounts: 'acc',
+  // Integrations
+  integrations: 'int', connections: 'con', webhooks: 'whk',
+  // Discovery
+  domains: 'dom', directories: 'dir', sources: 'src', resources: 'rsc',
+  // Events
+  events: 'evt', versions: 'ver', search: 'sch',
+  // Finance
+  'cost-events': 'cst', 'budget-policies': 'bgt',
+  // Media
   media: 'med',
-  actions: 'act',
-  events: 'evt',
-  versions: 'ver',
-  search: 'sch',
-  products: 'prd',
-  orders: 'ord',
-  comments: 'cmt',
-  categories: 'cat',
-  tags: 'tag',
+  // Legacy (backward compat)
+  posts: 'pos', pages: 'pag', products: 'prd', orders: 'ord',
+  categories: 'cat', tags: 'tag', actions: 'act',
 }
 
 export function registerPrefix(collection: string, prefix: string): void {

@@ -19,10 +19,20 @@ const COLLECTION_TIER: Record<string, CollectionTier> = {
   search: 'ch',
 }
 
+// Collections backed by the `actions` table instead of `data`
+const ACTIONS_COLLECTIONS = new Set(['agent-runs'])
+
+// Collections that emit version.created log entries on update
+const VERSIONED_COLLECTIONS = new Set([
+  'nouns', 'documents', 'agents', 'prompts', 'tools', 'functions',
+  'workflows', 'components', 'budget-policies',
+])
+
 interface CollectionDef {
   slug: string
   fields: FieldSchema[]
   prefix?: string
+  versioned?: boolean
 }
 
 export class DocumentAdapter {
@@ -78,6 +88,11 @@ export class DocumentAdapter {
     actor?: number
     meta?: RequestMeta
   }): Promise<{ id: Sqid; doc: unknown }> {
+    // Route actions-backed collections to the actions table
+    if (ACTIONS_COLLECTIONS.has(args.collection)) {
+      return this.createAction(args)
+    }
+
     const rand = generateRand()
     const fields = this.getFields(args.collection)
 
@@ -129,6 +144,67 @@ export class DocumentAdapter {
     })
   }
 
+  private async createAction(args: {
+    ns: number
+    collection: string
+    data: Record<string, unknown>
+    actor?: number
+    meta?: RequestMeta
+  }): Promise<{ id: Sqid; doc: unknown }> {
+    return transaction(this.pool as unknown as pg.Pool, async (tx) => {
+      const action = await enqueueAction(tx, {
+        ns: args.ns,
+        kind: args.data.kind as string ?? args.collection,
+        name: args.data.name as string ?? '',
+        input: args.data.input ?? args.data,
+        entity: args.data.entity as number | undefined,
+        scheduled: args.data.scheduled as Date | undefined,
+      })
+
+      const nsRow = this.nsResolver.getById(args.ns)
+      const identity = nsRow?.githuborgid ?? args.ns
+      return {
+        id: toSqid(args.collection, action.id, identity, action.created, action.rand) as Sqid,
+        doc: args.data,
+      }
+    })
+  }
+
+  private async findActions(args: {
+    ns: number
+    collection: string
+    limit?: number
+    offset?: number
+  }): Promise<{ docs: Array<{ id: Sqid } & Record<string, unknown>>; total: number }> {
+    const kind = args.collection === 'agent-runs' ? 'agent-run' : args.collection
+    const result = await query<ActionRow & { total: string }>(
+      this.pool as unknown as pg.Pool,
+      `SELECT *, count(*) OVER() AS total FROM actions
+       WHERE ns = $1 AND kind = $2
+       ORDER BY created DESC
+       LIMIT $3 OFFSET $4`,
+      [args.ns, kind, args.limit ?? 100, args.offset ?? 0],
+    )
+
+    const nsRow = this.nsResolver.getById(args.ns)
+    const identity = nsRow?.githuborgid ?? args.ns
+    const total = result.rows.length > 0 ? parseInt(result.rows[0].total, 10) : 0
+
+    return {
+      docs: result.rows.map(row => ({
+        id: toSqid(args.collection, row.id, identity, row.created, row.rand) as Sqid,
+        kind: row.kind,
+        name: row.name,
+        status: row.status,
+        input: row.input,
+        output: row.output,
+        steps: row.steps,
+        created: row.created,
+      })),
+      total,
+    }
+  }
+
   async find(args: {
     ns: number
     collection: string
@@ -137,6 +213,11 @@ export class DocumentAdapter {
     limit?: number
     offset?: number
   }): Promise<{ docs: Array<{ id: Sqid } & Record<string, unknown>>; total: number }> {
+    // Route actions-backed collections
+    if (ACTIONS_COLLECTIONS.has(args.collection)) {
+      return this.findActions(args)
+    }
+
     const ns = this.nsResolver.getById(args.ns)
 
     const result = ns?.parent
@@ -311,6 +392,20 @@ export class DocumentAdapter {
         meta: args.meta,
         rand: row.rand,
       })
+
+      // Version log for versioned collections
+      if (VERSIONED_COLLECTIONS.has(args.collection)) {
+        await insertLog(tx, {
+          ns: args.ns,
+          kind: 'version.created',
+          entity: workingId,
+          collection: args.collection,
+          actor: args.actor,
+          doc: merged,
+          meta: args.meta,
+          rand: row.rand,
+        })
+      }
 
       // Pending for search reindex
       await insertPending(tx, {
