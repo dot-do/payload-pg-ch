@@ -65,6 +65,39 @@ export class DocumentAdapter {
     await this.pool.end()
   }
 
+  async loadDynamicCollections(ns: number): Promise<number> {
+    const result = await query<{ doc: Record<string, unknown> }>(
+      this.pool as unknown as pg.Pool,
+      `SELECT doc FROM data WHERE ns = $1 AND collection = 'nouns' AND doc->>'schema' IS NOT NULL`,
+      [ns],
+    )
+
+    let loaded = 0
+    for (const row of result.rows) {
+      const doc = row.doc
+      const slug = doc.slug as string
+      const schema = doc.schema as { fields: Array<{ name: string; type: string; [k: string]: unknown }> }
+      if (!slug || !schema?.fields) continue
+
+      // Register the dynamic collection with a derived prefix
+      const prefix = slug.slice(0, 3)
+      registerPrefix(slug, prefix)
+      this.collections.set(slug, {
+        slug,
+        prefix,
+        fields: schema.fields.map(f => ({
+          name: f.name,
+          type: f.type,
+          relationTo: f.relationTo as string | string[] | undefined,
+          hasMany: f.hasMany as boolean | undefined,
+          fields: f.fields as FieldSchema[] | undefined,
+        })),
+      })
+      loaded++
+    }
+    return loaded
+  }
+
   tier(collection: string): CollectionTier {
     return COLLECTION_TIER[collection] ?? 'pg'
   }
