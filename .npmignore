@@ -1,0 +1,8 @@
+test/
+sql/
+src/
+.claude/
+.gitignore
+vitest.config.ts
+eslint.config.js
+tsconfig.json
