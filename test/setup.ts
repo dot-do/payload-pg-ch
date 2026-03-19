@@ -7,6 +7,7 @@ const { Pool } = pg
 const TEST_CONNECTION = process.env.TEST_DATABASE_URL ?? 'postgresql://postgres:test@localhost:5433/testdb'
 
 let pool: InstanceType<typeof Pool> | null = null
+let schemaReady = false
 
 export function getTestPool(): InstanceType<typeof Pool> {
   if (!pool) {
@@ -16,6 +17,7 @@ export function getTestPool(): InstanceType<typeof Pool> {
 }
 
 export async function setupTestSchema(): Promise<void> {
+  if (schemaReady) return
   const p = getTestPool()
 
   // Drop and recreate all tables
@@ -46,6 +48,8 @@ export async function setupTestSchema(): Promise<void> {
     const sql = readFileSync(join(sqlDir, file), 'utf-8')
     await p.query(sql)
   }
+
+  schemaReady = true
 }
 
 export async function cleanupTestData(): Promise<void> {
