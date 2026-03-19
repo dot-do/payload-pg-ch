@@ -16,7 +16,11 @@
     "dev": "tsc --watch",
     "test": "vitest run",
     "test:watch": "vitest",
-    "lint": "eslint src/"
+    "test:db:up": "docker compose -f docker-compose.test.yml up -d --wait",
+    "test:db:down": "docker compose -f docker-compose.test.yml down",
+    "test:ci": "docker compose -f docker-compose.test.yml up -d --wait && vitest run; docker compose -f docker-compose.test.yml down",
+    "lint": "eslint src/",
+    "check": "tsc --noEmit && eslint src/ && vitest run"
   },
   "peerDependencies": {
     "payload": "^3.0.0"
