@@ -679,20 +679,37 @@ describe('COW branching', () => {
 
   it('branch reads inherit from parent', async () => {
     // Create post in parent
-    await adapter.create({
+    const parentPost = await adapter.create({
       ns: nsId,
       collection: 'posts',
       data: { title: 'Parent Post' },
     })
 
-    // Query from branch should see parent's post
+    // find() from branch should see parent's post
     const branchPosts = await adapter.find({
       ns: branchNsId,
       collection: 'posts',
     })
-
     expect(branchPosts.total).toBe(1)
     expect(branchPosts.docs[0].title).toBe('Parent Post')
+
+    // findOne by sqid from branch should also see parent's post
+    const found = await adapter.findOne({
+      ns: branchNsId,
+      collection: 'posts',
+      id: parentPost.id,
+    })
+    expect(found).not.toBeNull()
+    expect(found!.title).toBe('Parent Post')
+
+    // findOne by where from branch should see parent's post
+    const foundByWhere = await adapter.findOne({
+      ns: branchNsId,
+      collection: 'posts',
+      where: { title: { equals: 'Parent Post' } },
+    })
+    expect(foundByWhere).not.toBeNull()
+    expect(foundByWhere!.title).toBe('Parent Post')
   })
 
   it('write in branch forks document (COW)', async () => {
