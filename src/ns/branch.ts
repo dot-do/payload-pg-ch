@@ -80,6 +80,12 @@ export async function mergeBranch(
           [branch.parent, parentId, doc.collection, JSON.stringify(parsed),
            JSON.stringify({ source: 'merge', branch: branchNsId }), generateRand()],
         )
+        // Queue for search reindexing
+        await query(
+          tx,
+          `INSERT INTO pending (ns, entity, collection, title, body) VALUES ($1, $2, $3, $4, $5)`,
+          [branch.parent, parentId, doc.collection, parsed.title ?? null, parsed.body ?? parsed.content ?? null],
+        )
       } else {
         // New document created in branch — insert into parent
         const newRow = await query<{ id: number }>(
@@ -96,6 +102,12 @@ export async function mergeBranch(
            VALUES ($1, 'data.created', $2, $3, $4, $5, $6, now())`,
           [branch.parent, newRow.rows[0].id, doc.collection, JSON.stringify(parsed),
            JSON.stringify({ source: 'merge', branch: branchNsId }), generateRand()],
+        )
+        // Queue for search indexing
+        await query(
+          tx,
+          `INSERT INTO pending (ns, entity, collection, title, body) VALUES ($1, $2, $3, $4, $5)`,
+          [branch.parent, newRow.rows[0].id, doc.collection, parsed.title ?? null, parsed.body ?? parsed.content ?? null],
         )
       }
       merged++
