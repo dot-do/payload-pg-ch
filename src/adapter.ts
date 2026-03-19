@@ -161,11 +161,11 @@ export class DocumentAdapter {
     const docs = await Promise.all(
       result.rows.map(async (row) => {
         const doc = typeof row.doc === 'string' ? JSON.parse(row.doc) : row.doc
-        const rels = await findRelsFrom(this.pool as unknown as pg.Pool, { from: row.id })
+        const rels = await fetchRelsWithTargets(this.pool as unknown as pg.Pool, row.id)
         return {
           id: this.rowToSqid(row),
           ...doc,
-          ...relsToDoc(rels, this.nsResolver, row.ns),
+          ...relsToDoc(rels, this.nsResolver),
         } as { id: Sqid } & Record<string, unknown>
       }),
     )
@@ -197,11 +197,11 @@ export class DocumentAdapter {
     if (!row) return null
 
     const doc = typeof row.doc === 'string' ? JSON.parse(row.doc) : row.doc
-    const rels = await findRelsFrom(this.pool as unknown as pg.Pool, { from: row.id })
+    const rels = await fetchRelsWithTargets(this.pool as unknown as pg.Pool, row.id)
     return {
       id: this.rowToSqid(row),
       ...doc,
-      ...relsToDoc(rels, this.nsResolver, row.ns),
+      ...relsToDoc(rels, this.nsResolver),
     }
   }
 
@@ -585,33 +585,57 @@ function extractBody(doc: Record<string, unknown>): string | undefined {
   return parts.length > 0 ? parts.join('\n') : undefined
 }
 
+interface RelWithTarget extends RelRow {
+  targetCollection: string
+  targetCreated: Date
+  targetRand: number
+  targetNs: number
+}
+
+async function fetchRelsWithTargets(
+  pool: pg.Pool,
+  fromId: number,
+): Promise<RelWithTarget[]> {
+  const result = await query<RelWithTarget>(
+    pool,
+    `SELECT r.*, d.collection AS "targetCollection", d.created AS "targetCreated",
+            d.rand AS "targetRand", d.ns AS "targetNs"
+     FROM rels r
+     JOIN data d ON d.id = r."to"
+     WHERE r."from" = $1
+     ORDER BY r.path, r.sort`,
+    [fromId],
+  )
+  return result.rows
+}
+
 function relsToDoc(
-  rels: RelRow[],
+  rels: RelWithTarget[],
   nsResolver: NsResolver,
-  ns: number,
 ): Record<string, unknown> {
   const result: Record<string, unknown> = {}
-  const grouped = new Map<string, RelRow[]>()
+  const grouped = new Map<string, RelWithTarget[]>()
 
   for (const rel of rels) {
-    // Strip array index from path for grouping
     const basePath = rel.path.replace(/\.\d+$/, '')
     if (!grouped.has(basePath)) grouped.set(basePath, [])
     grouped.get(basePath)!.push(rel)
   }
 
   for (const [path, pathRels] of grouped) {
-    const nsRow = nsResolver.getById(ns)
-    const identity = nsRow?.githuborgid ?? ns
-
     if (pathRels.length === 1 && !pathRels[0].path.match(/\.\d+$/)) {
-      // Single relationship
-      result[path] = toSqid('data', pathRels[0].to, identity, new Date(), 0)
+      const r = pathRels[0]
+      const nsRow = nsResolver.getById(r.targetNs)
+      const identity = nsRow?.githuborgid ?? r.targetNs
+      result[path] = toSqid(r.targetCollection, r.to, identity, r.targetCreated, r.targetRand)
     } else {
-      // Array relationship
       result[path] = pathRels
         .sort((a, b) => a.sort - b.sort)
-        .map(r => toSqid('data', r.to, identity, new Date(), 0))
+        .map(r => {
+          const nsRow = nsResolver.getById(r.targetNs)
+          const identity = nsRow?.githuborgid ?? r.targetNs
+          return toSqid(r.targetCollection, r.to, identity, r.targetCreated, r.targetRand)
+        })
     }
   }
 
