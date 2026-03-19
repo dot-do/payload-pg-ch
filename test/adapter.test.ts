@@ -713,6 +713,8 @@ describe('COW branching', () => {
     // Branch sees modified version
     const branchPosts = await adapter.find({ ns: branchNsId, collection: 'posts' })
     expect(branchPosts.docs[0].title).toBe('Modified in Branch')
+    // _parent internal field must not leak to API
+    expect(branchPosts.docs[0]._parent).toBeUndefined()
 
     // Parent still sees original
     const parentPosts = await adapter.find({ ns: nsId, collection: 'posts' })

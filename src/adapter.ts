@@ -162,9 +162,10 @@ export class DocumentAdapter {
       result.rows.map(async (row) => {
         const doc = typeof row.doc === 'string' ? JSON.parse(row.doc) : row.doc
         const rels = await fetchRelsWithTargets(this.pool as unknown as pg.Pool, row.id)
+        const { _parent: _, ...cleanDoc } = doc as Record<string, unknown>
         return {
           id: this.rowToSqid(row),
-          ...doc,
+          ...cleanDoc,
           ...relsToDoc(rels, this.nsResolver),
         } as { id: Sqid } & Record<string, unknown>
       }),
@@ -196,7 +197,8 @@ export class DocumentAdapter {
 
     if (!row) return null
 
-    const doc = typeof row.doc === 'string' ? JSON.parse(row.doc) : row.doc
+    const rawDoc = typeof row.doc === 'string' ? JSON.parse(row.doc) : row.doc
+    const { _parent: _, ...doc } = rawDoc as Record<string, unknown>
     const rels = await fetchRelsWithTargets(this.pool as unknown as pg.Pool, row.id)
     return {
       id: this.rowToSqid(row),
