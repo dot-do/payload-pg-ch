@@ -210,10 +210,11 @@ export function documentDBAdapter(config: DocumentDBAdapterConfig): DatabaseAdap
         // -- CRUD: Create --
 
         create: async (args: CreateArgs) => {
+          const { 'confirm-password': _, ...cleanData } = args.data as Record<string, unknown>
           const result = await adapter.create({
             ns,
             collection: args.collection,
-            data: args.data,
+            data: cleanData,
           })
           const doc = typeof result.doc === 'object' && result.doc !== null
             ? result.doc as Record<string, unknown>
@@ -271,11 +272,12 @@ export function documentDBAdapter(config: DocumentDBAdapterConfig): DatabaseAdap
 
           if (!docId) return { id: '' } as Record<string, unknown>
 
+          const { 'confirm-password': _cp, ...cleanUpdateData } = args.data as Record<string, unknown>
           const result = await adapter.updateOne({
             ns,
             collection: args.collection,
             id: docId,
-            data: args.data,
+            data: cleanUpdateData,
           })
 
           const doc = typeof result.doc === 'object' && result.doc !== null
