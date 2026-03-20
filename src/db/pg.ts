@@ -13,11 +13,29 @@ export type PgPoolClient = pg.PoolClient
 export interface PoolConfig {
   connectionString: string
   max?: number
+  ssl?: boolean | { rejectUnauthorized?: boolean }
+}
+
+function needsSSL(url: string): boolean {
+  try {
+    const parsed = new URL(url)
+    return !['localhost', '127.0.0.1', '::1'].includes(parsed.hostname)
+  } catch {
+    return false
+  }
 }
 
 export function createPool(config: string | PoolConfig): PgPool {
   const opts = typeof config === 'string' ? { connectionString: config } : config
-  return new Pool({ ...opts, max: opts.max ?? 20 })
+  const connStr = opts.connectionString
+
+  // Auto-detect SSL for non-localhost connections
+  let ssl = opts.ssl
+  if (ssl === undefined && needsSSL(connStr)) {
+    ssl = { rejectUnauthorized: false }
+  }
+
+  return new Pool({ connectionString: connStr, max: opts.max ?? 20, ssl: ssl || undefined })
 }
 
 export async function transaction<T>(
