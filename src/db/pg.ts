@@ -6,21 +6,23 @@ const { Pool, types } = pg
 // Safe for IDs up to Number.MAX_SAFE_INTEGER (9007199254740991)
 types.setTypeParser(20, (val: string) => parseInt(val, 10))
 
-export type { Pool, PoolClient } from 'pg'
+// Re-export concrete types derived from the runtime Pool constructor
+export type PgPool = InstanceType<typeof Pool>
+export type PgPoolClient = pg.PoolClient
 
 export interface PoolConfig {
   connectionString: string
   max?: number
 }
 
-export function createPool(config: string | PoolConfig): InstanceType<typeof Pool> {
+export function createPool(config: string | PoolConfig): PgPool {
   const opts = typeof config === 'string' ? { connectionString: config } : config
   return new Pool({ ...opts, max: opts.max ?? 20 })
 }
 
 export async function transaction<T>(
-  pool: InstanceType<typeof Pool>,
-  fn: (client: pg.PoolClient) => Promise<T>,
+  pool: PgPool,
+  fn: (client: PgPoolClient) => Promise<T>,
 ): Promise<T> {
   const client = await pool.connect()
   try {
@@ -29,7 +31,11 @@ export async function transaction<T>(
     await client.query('COMMIT')
     return result
   } catch (err) {
-    await client.query('ROLLBACK')
+    try {
+      await client.query('ROLLBACK')
+    } catch (rollbackErr) {
+      console.error('ROLLBACK failed:', rollbackErr)
+    }
     throw err
   } finally {
     client.release()
@@ -42,7 +48,7 @@ export interface QueryResult<T> {
 }
 
 export async function query<T>(
-  client: pg.PoolClient | InstanceType<typeof Pool>,
+  client: PgPoolClient | PgPool,
   sql: string,
   params?: unknown[],
 ): Promise<QueryResult<T>> {

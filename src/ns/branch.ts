@@ -1,4 +1,4 @@
-import type pg from 'pg'
+import type { PgPool } from '../db/pg.js'
 import type { NsRow } from '../types.js'
 import { query, transaction } from '../db/pg.js'
 import { generateRand } from '../id/sqids.js'
@@ -17,7 +17,7 @@ export interface CreateBranchArgs {
 }
 
 export async function createBranch(
-  pool: pg.Pool,
+  pool: PgPool,
   args: CreateBranchArgs,
 ): Promise<NsRow> {
   const result = await query<NsRow>(
@@ -42,7 +42,7 @@ export async function createBranch(
 }
 
 export async function mergeBranch(
-  pool: pg.Pool,
+  pool: PgPool,
   branchNsId: number,
 ): Promise<{ merged: number; deleted: number }> {
   return transaction(pool, async (tx) => {
@@ -173,7 +173,7 @@ export async function mergeBranch(
 }
 
 export async function cleanupBranch(
-  pool: pg.Pool,
+  pool: PgPool,
   branchNsId: number,
 ): Promise<void> {
   await transaction(pool, async (tx) => {
@@ -184,7 +184,7 @@ export async function cleanupBranch(
   })
 }
 
-export async function cleanupExpiredPreviews(pool: pg.Pool): Promise<number> {
+export async function cleanupExpiredPreviews(pool: PgPool): Promise<number> {
   const expired = await query<{ id: number }>(
     pool,
     `SELECT id FROM ns

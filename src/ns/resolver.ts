@@ -1,14 +1,14 @@
-import type pg from 'pg'
+import type { PgPool } from '../db/pg.js'
 import type { NsRow } from '../types.js'
 import { query } from '../db/pg.js'
 
 export class NsResolver {
   private cache = new Map<string, NsRow>()
   private byId = new Map<number, NsRow>()
-  private pool: pg.Pool
+  private pool: PgPool
   private refreshInterval: ReturnType<typeof setInterval> | null = null
 
-  constructor(pool: pg.Pool) {
+  constructor(pool: PgPool) {
     this.pool = pool
   }
 

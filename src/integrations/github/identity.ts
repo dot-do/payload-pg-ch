@@ -1,4 +1,4 @@
-import type pg from 'pg'
+import type { PgPool } from '../../db/pg.js'
 import { query } from '../../db/pg.js'
 
 export interface GitHubUser {
@@ -38,7 +38,7 @@ export async function fetchGitHubOrgs(token: string): Promise<GitHubOrg[]> {
 }
 
 export async function linkGitHubIdentity(
-  pool: pg.Pool,
+  pool: PgPool,
   userId: number,
   githubId: number,
 ): Promise<void> {
@@ -51,7 +51,7 @@ export async function linkGitHubIdentity(
 }
 
 export async function provisionOrgNamespaces(
-  pool: pg.Pool,
+  pool: PgPool,
   orgs: GitHubOrg[],
 ): Promise<void> {
   for (const org of orgs) {
@@ -74,7 +74,7 @@ export async function provisionOrgNamespaces(
 }
 
 export async function resolveGitHubOrgId(
-  pool: pg.Pool,
+  pool: PgPool,
   nsId: number,
 ): Promise<number | null> {
   const result = await query<{ githuborgid: number | null }>(

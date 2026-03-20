@@ -41,7 +41,7 @@ export async function syncOrgMemberships(
   userId: string,
   workosOrgId: string,
 ): Promise<void> {
-  await fetch('https://api.workos.com/fga/v1/warrants', {
+  const response = await fetch('https://api.workos.com/fga/v1/warrants', {
     method: 'POST',
     headers: {
       'Authorization': `Bearer ${config.apiKey}`,
@@ -53,4 +53,7 @@ export async function syncOrgMemberships(
       subject: { resourceType: 'user', resourceId: userId },
     }),
   })
+  if (!response.ok) {
+    throw new Error(`WorkOS syncOrgMemberships failed: ${response.status} ${await response.text()}`)
+  }
 }

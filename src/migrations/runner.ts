@@ -1,4 +1,4 @@
-import type pg from 'pg'
+import type { PgPool } from '../db/pg.js'
 import { readFile, readdir } from 'node:fs/promises'
 import { join } from 'node:path'
 import { query, transaction } from '../db/pg.js'
@@ -18,10 +18,10 @@ export interface CHConfig {
 }
 
 export class MigrationRunner {
-  private pg: pg.Pool
+  private pg: PgPool
   private ch?: CHConfig
 
-  constructor(pg: pg.Pool, ch?: CHConfig) {
+  constructor(pg: PgPool, ch?: CHConfig) {
     this.pg = pg
     this.ch = ch
   }

@@ -1,4 +1,4 @@
-import type pg from 'pg'
+import type { PgPool } from '../../db/pg.js'
 import { query } from '../../db/pg.js'
 import { emit } from '../../db/queries/log.js'
 
@@ -18,7 +18,7 @@ interface StripeEvent {
 }
 
 export async function handleStripeWebhook(
-  pool: pg.Pool,
+  pool: PgPool,
   event: StripeEvent,
 ): Promise<void> {
   const nsId = event.data.object.metadata?.nsId

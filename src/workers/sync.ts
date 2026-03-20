@@ -1,4 +1,4 @@
-import type pg from 'pg'
+import type { PgPool } from '../db/pg.js'
 import type { NsRow } from '../types.js'
 import { query } from '../db/pg.js'
 
@@ -7,7 +7,7 @@ export interface SyncConfig {
 }
 
 export async function syncPull(
-  _pool: pg.Pool,
+  _pool: PgPool,
   ns: NsRow,
   _config: SyncConfig,
 ): Promise<{ commit: string; changed: number }> {
@@ -28,7 +28,7 @@ export async function syncPull(
 }
 
 export async function syncPush(
-  _pool: pg.Pool,
+  _pool: PgPool,
   ns: NsRow,
   _config: SyncConfig,
 ): Promise<{ commit: string; changed: number }> {

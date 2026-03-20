@@ -1,4 +1,4 @@
-import type pg from 'pg'
+import type { PgPool } from '../db/pg.js'
 import { query } from '../db/pg.js'
 
 export interface RetentionConfig {
@@ -8,7 +8,7 @@ export interface RetentionConfig {
 }
 
 export async function runRetention(
-  pool: pg.Pool,
+  pool: PgPool,
   config: RetentionConfig = {},
 ): Promise<{ prunedPending: number; prunedSearch: number }> {
   const pendingDays = config.pendingRetentionDays ?? 7
@@ -39,7 +39,7 @@ export async function runRetention(
 }
 
 export async function dropOldLogPartitions(
-  pool: pg.Pool,
+  pool: PgPool,
   retentionDays: number = 90,
 ): Promise<string[]> {
   // List log partitions

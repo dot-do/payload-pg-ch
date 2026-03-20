@@ -1,4 +1,4 @@
-import type pg from 'pg'
+import type { PgPool, PgPoolClient } from '../pg.js'
 import type { RelRow, FieldSchema } from '../../types.js'
 import { query } from '../pg.js'
 
@@ -12,7 +12,7 @@ export interface InsertRelArgs {
 }
 
 export async function insertRel(
-  tx: pg.PoolClient,
+  tx: PgPoolClient,
   args: InsertRelArgs,
 ): Promise<RelRow> {
   const result = await query<RelRow>(
@@ -27,16 +27,32 @@ export async function insertRel(
 }
 
 export async function deleteRelsForEntity(
-  tx: pg.PoolClient,
+  tx: PgPoolClient,
   args: { ns: number; from: number },
 ): Promise<void> {
   await query(tx, `DELETE FROM rels WHERE ns = $1 AND "from" = $2`, [args.ns, args.from])
 }
 
 export async function findRelsFrom(
-  tx: pg.PoolClient | pg.Pool,
-  args: { from: number; path?: string },
+  tx: PgPoolClient | PgPool,
+  args: { from: number; path?: string; ns?: number },
 ): Promise<RelRow[]> {
+  if (args.ns !== undefined) {
+    if (args.path) {
+      const result = await query<RelRow>(
+        tx,
+        `SELECT * FROM rels WHERE "from" = $1 AND path = $2 AND ns = $3 ORDER BY sort`,
+        [args.from, args.path, args.ns],
+      )
+      return result.rows
+    }
+    const result = await query<RelRow>(
+      tx,
+      `SELECT * FROM rels WHERE "from" = $1 AND ns = $2 ORDER BY path, sort`,
+      [args.from, args.ns],
+    )
+    return result.rows
+  }
   if (args.path) {
     const result = await query<RelRow>(
       tx,
@@ -54,9 +70,17 @@ export async function findRelsFrom(
 }
 
 export async function findRelsTo(
-  tx: pg.PoolClient | pg.Pool,
-  args: { to: number },
+  tx: PgPoolClient | PgPool,
+  args: { to: number; ns?: number },
 ): Promise<RelRow[]> {
+  if (args.ns !== undefined) {
+    const result = await query<RelRow>(
+      tx,
+      `SELECT * FROM rels WHERE "to" = $1 AND ns = $2`,
+      [args.to, args.ns],
+    )
+    return result.rows
+  }
   const result = await query<RelRow>(
     tx,
     `SELECT * FROM rels WHERE "to" = $1`,

@@ -18,7 +18,7 @@ CREATE TABLE cdc.log (
   _peerdb_version       UInt64
 ) ENGINE = MergeTree()
 ORDER BY (ns, entity, created)
-PARTITION BY (ns, toYYYYMM(created));
+PARTITION BY toYYYYMM(created);
 
 -- CDC mirror of pg.data (current state, replacing)
 CREATE TABLE cdc.data (

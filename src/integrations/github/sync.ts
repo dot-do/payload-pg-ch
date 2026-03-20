@@ -1,4 +1,4 @@
-import type pg from 'pg'
+import type { PgPool } from '../../db/pg.js'
 import type { NsRow } from '../../types.js'
 import { query } from '../../db/pg.js'
 
@@ -7,7 +7,7 @@ export interface GitHubSyncConfig {
 }
 
 export async function pullFromGitHub(
-  pool: pg.Pool,
+  pool: PgPool,
   ns: NsRow,
   config: GitHubSyncConfig,
 ): Promise<{ commit: string; changed: number }> {
@@ -99,7 +99,7 @@ export async function pullFromGitHub(
 }
 
 export async function pushToGitHub(
-  _pool: pg.Pool,
+  _pool: PgPool,
   ns: NsRow,
   _config: GitHubSyncConfig,
 ): Promise<{ commit: string; changed: number }> {

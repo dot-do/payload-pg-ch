@@ -1,4 +1,4 @@
-import type pg from 'pg'
+import type { PgPool, PgPoolClient } from '../pg.js'
 import type { SearchRow } from '../../types.js'
 import { query } from '../pg.js'
 
@@ -16,7 +16,7 @@ export interface InsertSearchArgs {
 }
 
 export async function insertSearch(
-  tx: pg.PoolClient,
+  tx: PgPoolClient,
   args: InsertSearchArgs,
 ): Promise<SearchRow> {
   const result = await query<SearchRow>(
@@ -41,7 +41,7 @@ export async function insertSearch(
 }
 
 export async function searchByEmbedding(
-  pool: pg.Pool,
+  pool: PgPool,
   args: {
     ns: number
     collection?: string

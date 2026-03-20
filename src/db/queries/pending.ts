@@ -1,4 +1,4 @@
-import type pg from 'pg'
+import type { PgPool, PgPoolClient } from '../pg.js'
 import type { PendingRow } from '../../types.js'
 import { query } from '../pg.js'
 
@@ -13,7 +13,7 @@ export interface InsertPendingArgs {
 }
 
 export async function insertPending(
-  tx: pg.PoolClient,
+  tx: PgPoolClient,
   args: InsertPendingArgs,
 ): Promise<PendingRow> {
   const result = await query<PendingRow>(
@@ -35,7 +35,7 @@ export async function insertPending(
 }
 
 export async function dequeuePending(
-  tx: pg.PoolClient,
+  tx: PgPoolClient,
   limit: number = 10,
 ): Promise<PendingRow[]> {
   const result = await query<PendingRow>(
@@ -55,14 +55,14 @@ export async function dequeuePending(
 }
 
 export async function completePending(
-  tx: pg.PoolClient | pg.Pool,
+  tx: PgPoolClient | PgPool,
   id: number,
 ): Promise<void> {
   await query(tx, `UPDATE pending SET status = 'done' WHERE id = $1`, [id])
 }
 
 export async function failPending(
-  tx: pg.PoolClient | pg.Pool,
+  tx: PgPoolClient | PgPool,
   id: number,
 ): Promise<void> {
   await query(tx, `UPDATE pending SET status = 'failed' WHERE id = $1`, [id])

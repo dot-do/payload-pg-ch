@@ -30,7 +30,6 @@ import { createDatabaseAdapter } from 'payload'
 import { DocumentAdapter } from '../adapter.js'
 import type { Where as InternalWhere } from '../types.js'
 import { query } from '../db/pg.js'
-import type pg from 'pg'
 
 export interface DocumentDBAdapterConfig {
   postgres: string
@@ -130,7 +129,7 @@ export function documentDBAdapter(config: DocumentDBAdapterConfig): DatabaseAdap
           // Ensure DDL schema exists by running a lightweight check
           // The schema should already be applied, but we verify the data table exists.
           try {
-            await query(adapter.pool as unknown as pg.Pool, 'SELECT 1 FROM data LIMIT 0', [])
+            await query(adapter.pool, 'SELECT 1 FROM data LIMIT 0', [])
           } catch (_e) {
             // Schema not applied - callers should run sql/pg/*.sql files
             console.warn('[payload-pg-ch] data table not found. Ensure DDL from sql/pg/*.sql is applied.')
@@ -732,7 +731,7 @@ export function documentDBAdapter(config: DocumentDBAdapterConfig): DatabaseAdap
           `
 
           const result = await query<{ value: string; total: string }>(
-            adapter.pool as unknown as pg.Pool,
+            adapter.pool,
             sql,
             params,
           )

@@ -8,7 +8,7 @@ export async function storeSecret(
   value: string,
   environment: string = 'production',
 ): Promise<void> {
-  await fetch('https://api.workos.com/vault/v1/secrets', {
+  const response = await fetch('https://api.workos.com/vault/v1/secrets', {
     method: 'POST',
     headers: {
       'Authorization': `Bearer ${config.apiKey}`,
@@ -16,6 +16,9 @@ export async function storeSecret(
     },
     body: JSON.stringify({ name, value, environment }),
   })
+  if (!response.ok) {
+    throw new Error(`WorkOS storeSecret failed: ${response.status} ${await response.text()}`)
+  }
 }
 
 export async function getSecret(
@@ -37,11 +40,14 @@ export async function deleteSecret(
   config: VaultConfig,
   name: string,
 ): Promise<void> {
-  await fetch(
+  const response = await fetch(
     `https://api.workos.com/vault/v1/secrets/${encodeURIComponent(name)}`,
     {
       method: 'DELETE',
       headers: { 'Authorization': `Bearer ${config.apiKey}` },
     },
   )
+  if (!response.ok) {
+    throw new Error(`WorkOS deleteSecret failed: ${response.status} ${await response.text()}`)
+  }
 }

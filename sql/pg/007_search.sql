@@ -13,3 +13,6 @@ CREATE TABLE search (
   created       TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated       TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+CREATE INDEX idx_search_ns_collection ON search (ns, collection);
+CREATE INDEX idx_search_entity ON search (ns, entity);

@@ -1,4 +1,4 @@
-import type pg from 'pg'
+import type { PgPool } from '../../db/pg.js'
 import { query } from '../../db/pg.js'
 import { createBranch, mergeBranch, cleanupBranch } from '../../ns/branch.js'
 import { emit } from '../../db/queries/log.js'
@@ -30,7 +30,7 @@ interface PushEvent {
 }
 
 export async function handlePullRequest(
-  pool: pg.Pool,
+  pool: PgPool,
   event: PREvent,
 ): Promise<void> {
   const repo = event.repository.full_name
@@ -102,7 +102,7 @@ export async function handlePullRequest(
 }
 
 export async function handlePush(
-  pool: pg.Pool,
+  pool: PgPool,
   event: PushEvent,
 ): Promise<void> {
   const repo = event.repository.full_name

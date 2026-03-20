@@ -1,4 +1,4 @@
-import type pg from 'pg'
+import type { PgPool } from '../db/pg.js'
 import { query } from '../db/pg.js'
 
 export interface BudgetCheckResult {
@@ -9,7 +9,7 @@ export interface BudgetCheckResult {
 }
 
 export async function checkBudget(
-  pool: pg.Pool,
+  pool: PgPool,
   nsId: number,
   limit: number,
   warningThreshold: number = 80,

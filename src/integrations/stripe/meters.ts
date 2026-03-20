@@ -1,4 +1,4 @@
-import type pg from 'pg'
+import type { PgPool } from '../../db/pg.js'
 import { query } from '../../db/pg.js'
 
 export interface MeterConfig {
@@ -7,7 +7,7 @@ export interface MeterConfig {
 }
 
 export async function reportUsage(
-  pool: pg.Pool,
+  pool: PgPool,
   config: MeterConfig,
   nsId: number,
   since: Date,
@@ -34,7 +34,7 @@ export async function reportUsage(
     const meterName = mapping[kind]
     if (!meterName) continue
 
-    await fetch('https://api.stripe.com/v1/billing/meter_events', {
+    const meterResponse = await fetch('https://api.stripe.com/v1/billing/meter_events', {
       method: 'POST',
       headers: {
         'Authorization': `Bearer ${config.secretKey}`,
@@ -46,6 +46,9 @@ export async function reportUsage(
         'payload[stripe_customer_id]': customerId,
       }),
     })
+    if (!meterResponse.ok) {
+      throw new Error(`Stripe reportUsage failed for ${meterName}: ${meterResponse.status} ${await meterResponse.text()}`)
+    }
   }
 }
 

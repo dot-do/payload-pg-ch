@@ -1,9 +1,8 @@
-import type pg from 'pg'
 import type {
   Sqid, NsRow, DataRow, RelRow, ActionRow,
   Where, RequestMeta, CollectionTier, FieldSchema, AdapterConfig,
 } from './types.js'
-import { createPool, transaction, query, type Pool } from './db/pg.js'
+import { createPool, transaction, query, type PgPool } from './db/pg.js'
 import { toSqid, fromSqid, generateRand, registerPrefix } from './id/sqids.js'
 import { NsResolver } from './ns/resolver.js'
 import { createBranch, mergeBranch } from './ns/branch.js'
@@ -36,13 +35,13 @@ interface CollectionDef {
 }
 
 export class DocumentAdapter {
-  pool: Pool
+  pool: PgPool
   nsResolver: NsResolver
   private collections: Map<string, CollectionDef> = new Map()
 
   constructor(config: AdapterConfig, collections: CollectionDef[] = []) {
     this.pool = createPool(config.postgres)
-    this.nsResolver = new NsResolver(this.pool as unknown as pg.Pool)
+    this.nsResolver = new NsResolver(this.pool)
 
     // Register custom prefixes
     if (config.collections) {
@@ -67,7 +66,7 @@ export class DocumentAdapter {
 
   async loadDynamicCollections(ns: number): Promise<number> {
     const result = await query<{ doc: Record<string, unknown> }>(
-      this.pool as unknown as pg.Pool,
+      this.pool,
       `SELECT doc FROM data WHERE ns = $1 AND collection = 'nouns' AND doc->>'schema' IS NOT NULL`,
       [ns],
     )
@@ -129,7 +128,7 @@ export class DocumentAdapter {
     const rand = generateRand()
     const fields = this.getFields(args.collection)
 
-    return transaction(this.pool as unknown as pg.Pool, async (tx) => {
+    return transaction(this.pool, async (tx) => {
       const row = await insertData(tx, {
         ns: args.ns,
         collection: args.collection,
@@ -184,7 +183,7 @@ export class DocumentAdapter {
     actor?: number
     meta?: RequestMeta
   }): Promise<{ id: Sqid; doc: unknown }> {
-    return transaction(this.pool as unknown as pg.Pool, async (tx) => {
+    return transaction(this.pool, async (tx) => {
       const action = await enqueueAction(tx, {
         ns: args.ns,
         kind: args.data.kind as string ?? args.collection,
@@ -229,7 +228,7 @@ export class DocumentAdapter {
        LIMIT $${paramIdx++} OFFSET $${paramIdx++}`
 
     const result = await query<ActionRow & { total: string }>(
-      this.pool as unknown as pg.Pool,
+      this.pool,
       sql,
       params,
     )
@@ -259,7 +258,7 @@ export class DocumentAdapter {
     id: string
   }): Promise<({ id: Sqid } & Record<string, unknown>) | null> {
     const { id } = fromSqid(args.id)
-    const action = await findAction(this.pool as unknown as pg.Pool, id)
+    const action = await findAction(this.pool, id, args.ns)
     if (!action) return null
 
     const nsRow = this.nsResolver.getById(args.ns)
@@ -292,7 +291,7 @@ export class DocumentAdapter {
     const ns = this.nsResolver.getById(args.ns)
 
     const result = ns?.parent
-      ? await findDataCOW(this.pool as unknown as pg.Pool, {
+      ? await findDataCOW(this.pool, {
           ns: args.ns,
           parent: ns.parent,
           collection: args.collection,
@@ -301,7 +300,7 @@ export class DocumentAdapter {
           limit: args.limit,
           offset: args.offset,
         })
-      : await findData(this.pool as unknown as pg.Pool, {
+      : await findData(this.pool, {
           ns: args.ns,
           collection: args.collection,
           where: args.where,
@@ -310,18 +309,19 @@ export class DocumentAdapter {
           offset: args.offset,
         })
 
-    const docs = await Promise.all(
-      result.rows.map(async (row) => {
-        const doc = typeof row.doc === 'string' ? JSON.parse(row.doc) : row.doc
-        const rels = await fetchRelsWithTargets(this.pool as unknown as pg.Pool, row.id)
-        const { _parent: _, ...cleanDoc } = doc as Record<string, unknown>
-        return {
-          id: this.rowToSqid(row),
-          ...cleanDoc,
-          ...relsToDoc(rels, this.nsResolver),
-        } as { id: Sqid } & Record<string, unknown>
-      }),
-    )
+    const fromIds = result.rows.map(row => row.id)
+    const relsMap = await batchFetchRelsWithTargets(this.pool, fromIds, args.ns)
+
+    const docs = result.rows.map((row) => {
+      const doc = typeof row.doc === 'string' ? JSON.parse(row.doc) : row.doc
+      const rels = relsMap.get(row.id) ?? []
+      const { _parent: _, ...cleanDoc } = doc as Record<string, unknown>
+      return {
+        id: this.rowToSqid(row),
+        ...cleanDoc,
+        ...relsToDoc(rels, this.nsResolver),
+      } as { id: Sqid } & Record<string, unknown>
+    })
 
     return { docs, total: result.total }
   }
@@ -343,12 +343,12 @@ export class DocumentAdapter {
     if (args.id) {
       const { id } = fromSqid(args.id)
       // Try the current namespace first
-      row = await findOneData(this.pool as unknown as pg.Pool, { ns: args.ns, id })
+      row = await findOneData(this.pool, { ns: args.ns, id })
       // In a branch: if not found by parent id, check for forked doc or fall through to parent
       if (!row && ns?.parent) {
         // Check if doc is tombstoned in this branch
         const tombstone = await query<{ hidden: number }>(
-          this.pool as unknown as pg.Pool,
+          this.pool,
           `SELECT 1 AS hidden FROM data WHERE ns = $1 AND collection = '_tombstone' AND (doc->>'_parent')::bigint = $2`,
           [args.ns, id],
         )
@@ -358,7 +358,7 @@ export class DocumentAdapter {
         } else {
           // Look for a forked doc with _parent pointing to this id
           const forked = await query<DataRow>(
-            this.pool as unknown as pg.Pool,
+            this.pool,
             `SELECT * FROM data WHERE ns = $1 AND doc->>'_parent' = $2 LIMIT 1`,
             [args.ns, String(id)],
           )
@@ -366,14 +366,14 @@ export class DocumentAdapter {
             row = forked.rows[0]
           } else {
             // Fall through to parent
-            row = await findOneData(this.pool as unknown as pg.Pool, { ns: ns.parent, id })
+            row = await findOneData(this.pool, { ns: ns.parent, id })
           }
         }
       }
     } else if (args.where) {
       // Use COW path for where queries in branches
       if (ns?.parent) {
-        const result = await findDataCOW(this.pool as unknown as pg.Pool, {
+        const result = await findDataCOW(this.pool, {
           ns: args.ns,
           parent: ns.parent,
           collection: args.collection,
@@ -382,7 +382,7 @@ export class DocumentAdapter {
         })
         row = result.rows[0] ?? null
       } else {
-        const result = await findData(this.pool as unknown as pg.Pool, {
+        const result = await findData(this.pool, {
           ns: args.ns,
           collection: args.collection,
           where: args.where,
@@ -396,7 +396,7 @@ export class DocumentAdapter {
 
     const rawDoc = typeof row.doc === 'string' ? JSON.parse(row.doc) : row.doc
     const { _parent: _, ...doc } = rawDoc as Record<string, unknown>
-    const rels = await fetchRelsWithTargets(this.pool as unknown as pg.Pool, row.id)
+    const rels = await fetchRelsWithTargets(this.pool, row.id, args.ns)
     return {
       id: this.rowToSqid(row),
       ...doc,
@@ -416,7 +416,7 @@ export class DocumentAdapter {
     const ns = this.nsResolver.getById(args.ns)
     const fields = this.getFields(args.collection)
 
-    return transaction(this.pool as unknown as pg.Pool, async (tx) => {
+    return transaction(this.pool, async (tx) => {
       let workingId = intId
 
       // COW fork if in a branch
@@ -529,7 +529,7 @@ export class DocumentAdapter {
   }): Promise<{ deleted: number }> {
     const ns = this.nsResolver.getById(args.ns)
 
-    return transaction(this.pool as unknown as pg.Pool, async (tx) => {
+    return transaction(this.pool, async (tx) => {
       // Use COW read path if in a branch, so we see parent docs too
       const result = ns?.parent
         ? await findDataCOW(tx, {
@@ -601,7 +601,7 @@ export class DocumentAdapter {
     const fromDecoded = fromSqid(args.from)
     const toDecoded = fromSqid(args.to)
 
-    return transaction(this.pool as unknown as pg.Pool, async (tx) => {
+    return transaction(this.pool, async (tx) => {
       const rel = await insertRel(tx, {
         ns: args.ns,
         from: fromDecoded.id,
@@ -614,6 +614,7 @@ export class DocumentAdapter {
   }
 
   async related(args: {
+    ns?: number
     id: string
     path?: string
     direction?: 'from' | 'to'
@@ -622,13 +623,13 @@ export class DocumentAdapter {
     const dir = args.direction ?? 'from'
 
     const rels = dir === 'from'
-      ? await findRelsFrom(this.pool as unknown as pg.Pool, { from: id, path: args.path })
-      : await findRelsTo(this.pool as unknown as pg.Pool, { to: id })
+      ? await findRelsFrom(this.pool, { from: id, path: args.path, ns: args.ns })
+      : await findRelsTo(this.pool, { to: id, ns: args.ns })
 
     const results: Array<{ id: Sqid; path: string }> = []
     for (const rel of rels) {
       const targetId = dir === 'from' ? rel.to : rel.from
-      const target = await findOneData(this.pool as unknown as pg.Pool, { ns: rel.ns, id: targetId })
+      const target = await findOneData(this.pool, { ns: rel.ns, id: targetId })
       if (target) {
         results.push({ id: this.rowToSqid(target), path: rel.path })
       }
@@ -648,7 +649,7 @@ export class DocumentAdapter {
   }): Promise<Sqid> {
     const entityId = args.entity ? fromSqid(args.entity).id : undefined
 
-    return transaction(this.pool as unknown as pg.Pool, async (tx) => {
+    return transaction(this.pool, async (tx) => {
       const action = await enqueueAction(tx, {
         ns: args.ns,
         kind: args.kind,
@@ -665,26 +666,26 @@ export class DocumentAdapter {
   }
 
   async dequeue(args: { ns: number; kind?: string; limit?: number }): Promise<ActionRow[]> {
-    return transaction(this.pool as unknown as pg.Pool, async (tx) => {
+    return transaction(this.pool, async (tx) => {
       return dequeueActions(tx, args)
     })
   }
 
   async checkpoint(args: { id: string; step: number; result: unknown }): Promise<void> {
     const { id } = fromSqid(args.id)
-    return transaction(this.pool as unknown as pg.Pool, async (tx) => {
+    return transaction(this.pool, async (tx) => {
       await checkpointAction(tx, { id, step: args.step, result: args.result })
     })
   }
 
   async complete(args: { id: string; output?: unknown }): Promise<void> {
     const { id } = fromSqid(args.id)
-    await completeAction(this.pool as unknown as pg.Pool, { id, output: args.output })
+    await completeAction(this.pool, { id, output: args.output })
   }
 
   async fail(args: { id: string; error: unknown }): Promise<void> {
     const { id } = fromSqid(args.id)
-    await failAction(this.pool as unknown as pg.Pool, { id, error: args.error })
+    await failAction(this.pool, { id, error: args.error })
   }
 
   // --- Events ---
@@ -696,7 +697,7 @@ export class DocumentAdapter {
     actor?: number
     meta?: unknown
   }): Promise<void> {
-    await emit(this.pool as unknown as pg.Pool, args)
+    await emit(this.pool, args)
   }
 
   // --- Search ---
@@ -731,7 +732,7 @@ export class DocumentAdapter {
     `
 
     const result = await query<{ entity: number; collection: string; ns: number }>(
-      this.pool as unknown as pg.Pool, sql, params,
+      this.pool, sql, params,
     )
 
     const docs = result.rows.map(row => {
@@ -774,7 +775,7 @@ export class DocumentAdapter {
     `
 
     const result = await query<DataRow & { score: number }>(
-      this.pool as unknown as pg.Pool, sql, params,
+      this.pool, sql, params,
     )
 
     return {
@@ -798,7 +799,7 @@ export class DocumentAdapter {
     pr?: number
   }): Promise<NsRow> {
     const parentNs = this.nsResolver.getById(args.parent)
-    const ns = await createBranch(this.pool as unknown as pg.Pool, {
+    const ns = await createBranch(this.pool, {
       ...args,
       repo: parentNs?.repo ?? undefined,
       root: parentNs?.root ?? '/',
@@ -809,7 +810,7 @@ export class DocumentAdapter {
   }
 
   async mergeBranch(branchNs: number): Promise<{ merged: number; deleted: number }> {
-    const result = await mergeBranch(this.pool as unknown as pg.Pool, branchNs)
+    const result = await mergeBranch(this.pool, branchNs)
     await this.nsResolver.refresh()
     return result
   }
@@ -834,9 +835,23 @@ interface RelWithTarget extends RelRow {
 }
 
 async function fetchRelsWithTargets(
-  pool: pg.Pool,
+  pool: PgPool,
   fromId: number,
+  ns?: number,
 ): Promise<RelWithTarget[]> {
+  if (ns !== undefined) {
+    const result = await query<RelWithTarget>(
+      pool,
+      `SELECT r.*, d.collection AS "targetCollection", d.created AS "targetCreated",
+              d.rand AS "targetRand", d.ns AS "targetNs"
+       FROM rels r
+       JOIN data d ON d.id = r."to"
+       WHERE r."from" = $1 AND r.ns = $2
+       ORDER BY r.path, r.sort`,
+      [fromId, ns],
+    )
+    return result.rows
+  }
   const result = await query<RelWithTarget>(
     pool,
     `SELECT r.*, d.collection AS "targetCollection", d.created AS "targetCreated",
@@ -848,6 +863,48 @@ async function fetchRelsWithTargets(
     [fromId],
   )
   return result.rows
+}
+
+async function batchFetchRelsWithTargets(
+  pool: PgPool,
+  fromIds: number[],
+  ns?: number,
+): Promise<Map<number, RelWithTarget[]>> {
+  const map = new Map<number, RelWithTarget[]>()
+  if (fromIds.length === 0) return map
+
+  const result = ns !== undefined
+    ? await query<RelWithTarget>(
+        pool,
+        `SELECT r.*, d.collection AS "targetCollection", d.created AS "targetCreated",
+                d.rand AS "targetRand", d.ns AS "targetNs"
+         FROM rels r
+         JOIN data d ON d.id = r."to"
+         WHERE r."from" = ANY($1) AND r.ns = $2
+         ORDER BY r."from", r.path, r.sort`,
+        [fromIds, ns],
+      )
+    : await query<RelWithTarget>(
+        pool,
+        `SELECT r.*, d.collection AS "targetCollection", d.created AS "targetCreated",
+                d.rand AS "targetRand", d.ns AS "targetNs"
+         FROM rels r
+         JOIN data d ON d.id = r."to"
+         WHERE r."from" = ANY($1)
+         ORDER BY r."from", r.path, r.sort`,
+        [fromIds],
+      )
+
+  for (const row of result.rows) {
+    const list = map.get(row.from)
+    if (list) {
+      list.push(row)
+    } else {
+      map.set(row.from, [row])
+    }
+  }
+
+  return map
 }
 
 function relsToDoc(

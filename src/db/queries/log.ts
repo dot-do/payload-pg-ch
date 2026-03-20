@@ -1,4 +1,4 @@
-import type pg from 'pg'
+import type { PgPool, PgPoolClient } from '../pg.js'
 import type { LogRow } from '../../types.js'
 import { query } from '../pg.js'
 import { generateRand } from '../../id/sqids.js'
@@ -17,7 +17,7 @@ export interface InsertLogArgs {
 }
 
 export async function insertLog(
-  tx: pg.PoolClient,
+  tx: PgPoolClient,
   args: InsertLogArgs,
 ): Promise<LogRow> {
   const result = await query<LogRow>(
@@ -42,7 +42,7 @@ export async function insertLog(
 }
 
 export async function emit(
-  pool: pg.Pool,
+  pool: PgPool,
   args: {
     ns: number
     kind: string

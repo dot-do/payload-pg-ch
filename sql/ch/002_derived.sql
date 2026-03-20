@@ -11,7 +11,7 @@ CREATE TABLE events (
   embedding     Array(Float32)
 ) ENGINE = MergeTree()
 ORDER BY (ns, kind, entity, ts)
-PARTITION BY (ns, toYYYYMM(ts));
+PARTITION BY toYYYYMM(ts);
 
 -- Derived versions table (materialized from cdc.log)
 CREATE TABLE versions (
@@ -29,7 +29,7 @@ CREATE TABLE versions (
   embedding     Array(Float32)
 ) ENGINE = ReplacingMergeTree(version)
 ORDER BY (ns, entity, version)
-PARTITION BY (ns, toYYYYMM(created));
+PARTITION BY toYYYYMM(created);
 
 -- Derived search table (materialized from cdc.search)
 CREATE TABLE search (
@@ -48,4 +48,4 @@ CREATE TABLE search (
   updated       DateTime64(3)
 ) ENGINE = ReplacingMergeTree(version)
 ORDER BY (ns, collection, entity)
-PARTITION BY (ns, toYYYYMM(updated));
+PARTITION BY toYYYYMM(updated);

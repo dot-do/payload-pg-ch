@@ -1,9 +1,9 @@
-import type pg from 'pg'
+import type { PgPool } from '../../db/pg.js'
 import { query } from '../../db/pg.js'
 import type { StripeConfig } from './billing.js'
 
 export async function createConnectAccount(
-  pool: pg.Pool,
+  pool: PgPool,
   config: StripeConfig,
   nsId: number,
   type: 'standard' | 'express' = 'standard',
@@ -27,6 +27,9 @@ export async function createConnectAccount(
     }),
   })
 
+  if (!response.ok) {
+    throw new Error(`Stripe createConnectAccount failed: ${response.status} ${await response.text()}`)
+  }
   const account = await response.json() as { id: string }
   await query(pool, `UPDATE ns SET connect = $1, updated = now() WHERE id = $2`, [account.id, nsId])
   return account.id
@@ -52,6 +55,9 @@ export async function getOnboardingLink(
     }),
   })
 
+  if (!response.ok) {
+    throw new Error(`Stripe getOnboardingLink failed: ${response.status} ${await response.text()}`)
+  }
   const link = await response.json() as { url: string }
   return link.url
 }
@@ -81,6 +87,9 @@ export async function createPaymentIntent(
     body: params,
   })
 
+  if (!response.ok) {
+    throw new Error(`Stripe createPaymentIntent failed: ${response.status} ${await response.text()}`)
+  }
   return response.json() as Promise<{ id: string; clientSecret: string }>
 }
 
@@ -95,6 +104,9 @@ export async function getBalance(
     },
   })
 
+  if (!response.ok) {
+    throw new Error(`Stripe getBalance failed: ${response.status} ${await response.text()}`)
+  }
   const balance = await response.json() as {
     available: Array<{ amount: number }>
     pending: Array<{ amount: number }>

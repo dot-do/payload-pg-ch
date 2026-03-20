@@ -1,4 +1,4 @@
-import type pg from 'pg'
+import type { PgPool, PgPoolClient } from '../pg.js'
 import type { ActionRow } from '../../types.js'
 import { query } from '../pg.js'
 import { generateRand } from '../../id/sqids.js'
@@ -16,7 +16,7 @@ export interface EnqueueActionArgs {
 }
 
 export async function enqueueAction(
-  tx: pg.PoolClient,
+  tx: PgPoolClient,
   args: EnqueueActionArgs,
 ): Promise<ActionRow> {
   const rand = args.rand ?? generateRand()
@@ -41,7 +41,7 @@ export async function enqueueAction(
 }
 
 export async function dequeueActions(
-  tx: pg.PoolClient,
+  tx: PgPoolClient,
   args: { ns: number; kind?: string; limit?: number },
 ): Promise<ActionRow[]> {
   const conditions = [
@@ -77,7 +77,7 @@ export async function dequeueActions(
 }
 
 export async function checkpointAction(
-  tx: pg.PoolClient,
+  tx: PgPoolClient,
   args: { id: number; step: number; result: unknown },
 ): Promise<boolean> {
   const result = await query(
@@ -91,7 +91,7 @@ export async function checkpointAction(
 }
 
 export async function completeAction(
-  pool: pg.Pool | pg.PoolClient,
+  pool: PgPool | PgPoolClient,
   args: { id: number; output?: unknown },
 ): Promise<boolean> {
   const result = await query(
@@ -105,7 +105,7 @@ export async function completeAction(
 }
 
 export async function failAction(
-  pool: pg.Pool | pg.PoolClient,
+  pool: PgPool | PgPoolClient,
   args: { id: number; error: unknown },
 ): Promise<boolean> {
   // Fail but auto-retry if under cap
@@ -124,9 +124,14 @@ export async function failAction(
 }
 
 export async function findAction(
-  pool: pg.Pool | pg.PoolClient,
+  pool: PgPool | PgPoolClient,
   id: number,
+  ns?: number,
 ): Promise<ActionRow | null> {
+  if (ns !== undefined) {
+    const result = await query<ActionRow>(pool, `SELECT * FROM actions WHERE id = $1 AND ns = $2`, [id, ns])
+    return result.rows[0] ?? null
+  }
   const result = await query<ActionRow>(pool, `SELECT * FROM actions WHERE id = $1`, [id])
   return result.rows[0] ?? null
 }

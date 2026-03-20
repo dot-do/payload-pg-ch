@@ -1,4 +1,4 @@
-import type pg from 'pg'
+import type { PgPool } from '../db/pg.js'
 import { transaction, query } from '../db/pg.js'
 import { dequeuePending, completePending, failPending } from '../db/queries/pending.js'
 import { insertSearch } from '../db/queries/search.js'
@@ -10,7 +10,7 @@ export interface IndexerConfig {
 }
 
 export async function runIndexerOnce(
-  pool: pg.Pool,
+  pool: PgPool,
   config: IndexerConfig,
 ): Promise<number> {
   const batchSize = config.batchSize ?? 10
@@ -75,7 +75,7 @@ export async function runIndexerOnce(
 }
 
 export function startIndexer(
-  pool: pg.Pool,
+  pool: PgPool,
   config: IndexerConfig,
 ): { stop: () => void } {
   const interval = config.pollIntervalMs ?? 5000
@@ -95,7 +95,7 @@ export function startIndexer(
     }
   }
 
-  loop()
+  loop().catch(err => console.error('Indexer loop crashed:', err))
 
   return {
     stop() {
@@ -106,10 +106,10 @@ export function startIndexer(
 
 async function computeEmbedding(apiKey: string, text: string): Promise<number[]> {
   const response = await fetch(
-    `https://generativelanguage.googleapis.com/v1beta/models/text-embedding-004:embedContent?key=${apiKey}`,
+    `https://generativelanguage.googleapis.com/v1beta/models/text-embedding-004:embedContent`,
     {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', 'x-goog-api-key': apiKey },
       body: JSON.stringify({
         model: 'models/text-embedding-004',
         content: { parts: [{ text }] },

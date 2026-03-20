@@ -1,4 +1,4 @@
-import type pg from 'pg'
+import type { PgPool } from '../../db/pg.js'
 import { query } from '../../db/pg.js'
 
 export interface WorkOSConfig {
@@ -17,7 +17,7 @@ export interface WorkOSSession {
   organizationId?: string
 }
 
-export function createAuthStrategy(pool: pg.Pool, config: WorkOSConfig) {
+export function createAuthStrategy(pool: PgPool, config: WorkOSConfig) {
   return {
     name: 'workos' as const,
     authenticate: async ({ headers }: { headers: Headers }) => {

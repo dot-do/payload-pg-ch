@@ -1,4 +1,4 @@
-import type pg from 'pg'
+import type { PgPool, PgPoolClient } from '../pg.js'
 import type { DataRow } from '../../types.js'
 import { query } from '../pg.js'
 import { whereToSQL } from '../where.js'
@@ -16,7 +16,7 @@ export interface InsertDataArgs {
 }
 
 export async function insertData(
-  tx: pg.PoolClient,
+  tx: PgPoolClient,
   args: InsertDataArgs,
 ): Promise<DataRow> {
   const result = await query<DataRow>(
@@ -48,7 +48,7 @@ export interface UpdateDataArgs {
 }
 
 export async function updateData(
-  tx: pg.PoolClient,
+  tx: PgPoolClient,
   args: UpdateDataArgs,
 ): Promise<DataRow> {
   const result = await query<DataRow>(
@@ -72,7 +72,7 @@ export async function updateData(
 }
 
 export async function deleteData(
-  tx: pg.PoolClient,
+  tx: PgPoolClient,
   args: { ns: number; id: number },
 ): Promise<void> {
   await query(tx, `DELETE FROM data WHERE id = $1 AND ns = $2`, [args.id, args.ns])
@@ -88,7 +88,7 @@ export interface FindDataArgs {
 }
 
 export async function findData(
-  tx: pg.PoolClient | pg.Pool,
+  tx: PgPoolClient | PgPool,
   args: FindDataArgs,
 ): Promise<{ rows: DataRow[]; total: number }> {
   const conditions = ['data.ns = $1', 'data.collection = $2']
@@ -132,7 +132,7 @@ export async function findData(
 }
 
 export async function findOneData(
-  tx: pg.PoolClient | pg.Pool,
+  tx: PgPoolClient | PgPool,
   args: { ns: number; id: number },
 ): Promise<DataRow | null> {
   const result = await query<DataRow>(
@@ -144,7 +144,7 @@ export async function findOneData(
 }
 
 export async function findDataCOW(
-  tx: pg.PoolClient | pg.Pool,
+  tx: PgPoolClient | PgPool,
   args: {
     ns: number
     parent: number

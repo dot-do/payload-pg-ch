@@ -20,7 +20,7 @@ export type {
   AdapterConfig,
 } from './types.js'
 
-export type { Pool, PoolClient, PoolConfig } from './db/pg.js'
+export type { PgPool, PgPoolClient, PoolConfig } from './db/pg.js'
 
 // Payload CMS database adapter bridge
 export { documentDBAdapter } from './payload/database-adapter.js'

@@ -1,4 +1,4 @@
-import type pg from 'pg'
+import type { PgPool } from '../../db/pg.js'
 import { query } from '../../db/pg.js'
 
 export interface StripeConfig {
@@ -6,7 +6,7 @@ export interface StripeConfig {
 }
 
 export async function createCustomer(
-  pool: pg.Pool,
+  pool: PgPool,
   config: StripeConfig,
   nsId: number,
   email: string,
@@ -23,13 +23,16 @@ export async function createCustomer(
     }),
   })
 
+  if (!response.ok) {
+    throw new Error(`Stripe createCustomer failed: ${response.status} ${await response.text()}`)
+  }
   const customer = await response.json() as { id: string }
   await query(pool, `UPDATE ns SET stripe = $1, updated = now() WHERE id = $2`, [customer.id, nsId])
   return customer.id
 }
 
 export async function createSubscription(
-  pool: pg.Pool,
+  pool: PgPool,
   config: StripeConfig,
   nsId: number,
   customerId: string,
@@ -48,6 +51,9 @@ export async function createSubscription(
     }),
   })
 
+  if (!response.ok) {
+    throw new Error(`Stripe createSubscription failed: ${response.status} ${await response.text()}`)
+  }
   const subscription = await response.json() as { id: string }
   const plan = derivePlan(priceId)
   await query(
@@ -59,15 +65,18 @@ export async function createSubscription(
 }
 
 export async function cancelSubscription(
-  pool: pg.Pool,
+  pool: PgPool,
   config: StripeConfig,
   nsId: number,
   subscriptionId: string,
 ): Promise<void> {
-  await fetch(`https://api.stripe.com/v1/subscriptions/${subscriptionId}`, {
+  const response = await fetch(`https://api.stripe.com/v1/subscriptions/${subscriptionId}`, {
     method: 'DELETE',
     headers: { 'Authorization': `Bearer ${config.secretKey}` },
   })
+  if (!response.ok) {
+    throw new Error(`Stripe cancelSubscription failed: ${response.status} ${await response.text()}`)
+  }
 
   await query(
     pool,
@@ -76,7 +85,7 @@ export async function cancelSubscription(
   )
 }
 
-export async function getPlan(pool: pg.Pool, nsId: number): Promise<string> {
+export async function getPlan(pool: PgPool, nsId: number): Promise<string> {
   const result = await query<{ plan: string }>(pool, `SELECT plan FROM ns WHERE id = $1`, [nsId])
   return result.rows[0]?.plan ?? 'free'
 }
