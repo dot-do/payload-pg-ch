@@ -11,7 +11,7 @@ import { insertData, updateData, deleteData, findData, findOneData, findDataCOW 
 import { insertRel, deleteRelsForEntity, findRelsFrom, findRelsTo, extractRels } from './db/queries/rels.js'
 import { insertLog, emit } from './db/queries/log.js'
 import { insertPending } from './db/queries/pending.js'
-import { enqueueAction, dequeueActions, checkpointAction, completeAction, failAction } from './db/queries/actions.js'
+import { enqueueAction, dequeueActions, checkpointAction, completeAction, failAction, findAction } from './db/queries/actions.js'
 
 const COLLECTION_TIER: Record<string, CollectionTier> = {
   events: 'ch',
@@ -206,17 +206,32 @@ export class DocumentAdapter {
   private async findActions(args: {
     ns: number
     collection: string
+    where?: Where
     limit?: number
     offset?: number
   }): Promise<{ docs: Array<{ id: Sqid } & Record<string, unknown>>; total: number }> {
     const kind = args.collection === 'agent-runs' ? 'agent-run' : args.collection
+    const conditions = ['ns = $1', 'kind = $2']
+    const params: unknown[] = [args.ns, kind]
+    let paramIdx = 3
+
+    // Support basic status filtering from where clause
+    const statusFilter = args.where?.status as { equals?: string } | undefined
+    if (statusFilter?.equals) {
+      conditions.push(`status = $${paramIdx++}`)
+      params.push(statusFilter.equals)
+    }
+
+    params.push(args.limit ?? 100, args.offset ?? 0)
+    const sql = `SELECT *, count(*) OVER() AS total FROM actions
+       WHERE ${conditions.join(' AND ')}
+       ORDER BY created DESC
+       LIMIT $${paramIdx++} OFFSET $${paramIdx++}`
+
     const result = await query<ActionRow & { total: string }>(
       this.pool as unknown as pg.Pool,
-      `SELECT *, count(*) OVER() AS total FROM actions
-       WHERE ns = $1 AND kind = $2
-       ORDER BY created DESC
-       LIMIT $3 OFFSET $4`,
-      [args.ns, kind, args.limit ?? 100, args.offset ?? 0],
+      sql,
+      params,
     )
 
     const nsRow = this.nsResolver.getById(args.ns)
@@ -235,6 +250,29 @@ export class DocumentAdapter {
         created: row.created,
       })),
       total,
+    }
+  }
+
+  private async findOneAction(args: {
+    ns: number
+    collection: string
+    id: string
+  }): Promise<({ id: Sqid } & Record<string, unknown>) | null> {
+    const { id } = fromSqid(args.id)
+    const action = await findAction(this.pool as unknown as pg.Pool, id)
+    if (!action) return null
+
+    const nsRow = this.nsResolver.getById(args.ns)
+    const identity = nsRow?.githuborgid ?? args.ns
+    return {
+      id: toSqid(args.collection, action.id, identity, action.created, action.rand) as Sqid,
+      kind: action.kind,
+      name: action.name,
+      status: action.status,
+      input: action.input,
+      output: action.output,
+      steps: action.steps,
+      created: action.created,
     }
   }
 
@@ -294,6 +332,11 @@ export class DocumentAdapter {
     where?: Where
     id?: string
   }): Promise<({ id: Sqid } & Record<string, unknown>) | null> {
+    // Route actions-backed collections to the actions table
+    if (ACTIONS_COLLECTIONS.has(args.collection) && args.id) {
+      return this.findOneAction(args as { ns: number; collection: string; id: string })
+    }
+
     const ns = this.nsResolver.getById(args.ns)
     let row: DataRow | null = null
 
@@ -303,17 +346,28 @@ export class DocumentAdapter {
       row = await findOneData(this.pool as unknown as pg.Pool, { ns: args.ns, id })
       // In a branch: if not found by parent id, check for forked doc or fall through to parent
       if (!row && ns?.parent) {
-        // Look for a forked doc with _parent pointing to this id
-        const forked = await query<DataRow>(
+        // Check if doc is tombstoned in this branch
+        const tombstone = await query<{ hidden: number }>(
           this.pool as unknown as pg.Pool,
-          `SELECT * FROM data WHERE ns = $1 AND doc->>'_parent' = $2 LIMIT 1`,
-          [args.ns, String(id)],
+          `SELECT 1 AS hidden FROM data WHERE ns = $1 AND collection = '_tombstone' AND (doc->>'_parent')::bigint = $2`,
+          [args.ns, id],
         )
-        if (forked.rows[0]) {
-          row = forked.rows[0]
+        if (tombstone.rows.length > 0) {
+          // Doc was deleted in this branch — return null
+          row = null
         } else {
-          // Fall through to parent
-          row = await findOneData(this.pool as unknown as pg.Pool, { ns: ns.parent, id })
+          // Look for a forked doc with _parent pointing to this id
+          const forked = await query<DataRow>(
+            this.pool as unknown as pg.Pool,
+            `SELECT * FROM data WHERE ns = $1 AND doc->>'_parent' = $2 LIMIT 1`,
+            [args.ns, String(id)],
+          )
+          if (forked.rows[0]) {
+            row = forked.rows[0]
+          } else {
+            // Fall through to parent
+            row = await findOneData(this.pool as unknown as pg.Pool, { ns: ns.parent, id })
+          }
         }
       }
     } else if (args.where) {
@@ -367,13 +421,25 @@ export class DocumentAdapter {
 
       // COW fork if in a branch
       if (ns?.parent) {
-        const exists = await findOneData(tx, { ns: args.ns, id: intId })
+        let exists = await findOneData(tx, { ns: args.ns, id: intId })
+        if (!exists) {
+          // Check if we already forked this doc (forked doc has _parent = intId)
+          const forkedResult = await query<DataRow>(
+            tx,
+            `SELECT * FROM data WHERE ns = $1 AND doc->>'_parent' = $2 LIMIT 1`,
+            [args.ns, String(intId)],
+          )
+          if (forkedResult.rows[0]) {
+            exists = forkedResult.rows[0]
+            workingId = exists.id
+          }
+        }
         if (!exists) {
           const parentDoc = await findOneData(tx, { ns: ns.parent, id: intId })
           if (parentDoc) {
             const parentDocObj = typeof parentDoc.doc === 'string' ? JSON.parse(parentDoc.doc) : parentDoc.doc
             const forkedDoc = { ...parentDocObj, _parent: parentDoc.id }
-            const forked = await insertData(tx, {
+            const forkedRow = await insertData(tx, {
               ns: args.ns,
               collection: parentDoc.collection,
               slug: parentDoc.slug,
@@ -382,7 +448,7 @@ export class DocumentAdapter {
               locale: parentDoc.locale,
               rand: parentDoc.rand,
             })
-            workingId = forked.id
+            workingId = forkedRow.id
           }
         }
       }
@@ -481,13 +547,20 @@ export class DocumentAdapter {
       let deleted = 0
       for (const row of result.rows) {
         if (ns?.parent) {
-          // In a branch: write tombstone referencing the parent doc's id
-          await insertData(tx, {
-            ns: args.ns,
-            collection: '_tombstone',
-            doc: { _parent: row.id, _deleted: true },
-            rand: 0,
-          })
+          const rowDoc = typeof row.doc === 'string' ? JSON.parse(row.doc) : row.doc
+          const hasParent = rowDoc && typeof rowDoc === 'object' && '_parent' in rowDoc
+          if (row.ns === args.ns && !hasParent) {
+            // Branch-created doc (no _parent): delete the actual row
+            await deleteData(tx, { ns: args.ns, id: row.id })
+          } else {
+            // Inherited from parent: write tombstone
+            await insertData(tx, {
+              ns: args.ns,
+              collection: '_tombstone',
+              doc: { _parent: row.id, _deleted: true },
+              rand: 0,
+            })
+          }
         } else {
           await deleteData(tx, { ns: args.ns, id: row.id })
         }
@@ -501,6 +574,14 @@ export class DocumentAdapter {
           meta: args.meta,
           rand: row.rand,
         })
+
+        // Pending row for search de-indexing
+        await insertPending(tx, {
+          ns: args.ns,
+          entity: row.id,
+          collection: args.collection,
+        })
+
         deleted++
       }
 

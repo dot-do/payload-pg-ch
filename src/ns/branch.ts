@@ -51,6 +51,7 @@ export async function mergeBranch(
     const branch = nsResult.rows[0]
     if (!branch) throw new Error(`Branch namespace not found: ${branchNsId}`)
     if (!branch.parent) throw new Error(`Cannot merge a root namespace`)
+    if (branch.merged) throw new Error('Branch already merged')
 
     // Get modified docs (excluding tombstones)
     const docsResult = await query<{ id: number; doc: unknown; collection: string; slug: string | null; status: string | null; locale: string | null; rand: number; created: Date }>(

@@ -36,12 +36,20 @@ export function whereToSQL(
       clauses.push(`${col} != ${nextParam(op.not_equals)}`)
     }
     if (op.in !== undefined) {
-      const placeholders = op.in.map(v => nextParam(v)).join(', ')
-      clauses.push(`${col} IN (${placeholders})`)
+      if (op.in.length === 0) {
+        clauses.push('1=0')
+      } else {
+        const placeholders = op.in.map(v => nextParam(v)).join(', ')
+        clauses.push(`${col} IN (${placeholders})`)
+      }
     }
     if (op.not_in !== undefined) {
-      const placeholders = op.not_in.map(v => nextParam(v)).join(', ')
-      clauses.push(`${col} NOT IN (${placeholders})`)
+      if (op.not_in.length === 0) {
+        clauses.push('1=1')
+      } else {
+        const placeholders = op.not_in.map(v => nextParam(v)).join(', ')
+        clauses.push(`${col} NOT IN (${placeholders})`)
+      }
     }
     if (op.like !== undefined) {
       clauses.push(`${col} LIKE ${nextParam(op.like)}`)
@@ -65,10 +73,11 @@ export function whereToSQL(
       if (PROMOTED_COLUMNS.has(field)) {
         clauses.push(op.exists ? `${col} IS NOT NULL` : `${col} IS NULL`)
       } else {
+        const escapedField = field.replace(/'/g, "''")
         clauses.push(
           op.exists
-            ? `${table}.doc ? '${field}'`
-            : `NOT (${table}.doc ? '${field}')`,
+            ? `${table}.doc ? '${escapedField}'`
+            : `NOT (${table}.doc ? '${escapedField}')`,
         )
       }
     }

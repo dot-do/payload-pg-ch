@@ -14,14 +14,17 @@ export function evaluateToolAccess(
     }
   }
 
-  // Check allow list
-  if (permissions.allow) {
-    for (const pattern of permissions.allow) {
-      if (matchPattern(pattern, toolName)) return true
-    }
+  // If allow list is not defined, default to allow (only deny blocks)
+  if (permissions.allow == null) {
+    return true
   }
 
-  // Default: deny if allow list exists but didn't match
+  // Check allow list (whitelist mode)
+  for (const pattern of permissions.allow) {
+    if (matchPattern(pattern, toolName)) return true
+  }
+
+  // Allow list is defined but didn't match — deny
   return false
 }
 

@@ -23,7 +23,18 @@ export async function checkBudget(
   )
 
   const totalSpent = parseFloat(result.rows[0].total)
-  const percentUsed = limit > 0 ? (totalSpent / limit) * 100 : 0
+
+  // limit <= 0 means unlimited (no budget constraint)
+  if (limit <= 0) {
+    return {
+      totalSpent,
+      percentUsed: 0,
+      exceeded: false,
+      warning: false,
+    }
+  }
+
+  const percentUsed = (totalSpent / limit) * 100
 
   return {
     totalSpent,

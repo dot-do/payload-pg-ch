@@ -25,6 +25,7 @@ beforeEach(async () => {
   tempDir = await mkdtemp(join(tmpdir(), 'migrations-'))
   // Drop migrations table to start fresh
   await query(pool, `DROP TABLE IF EXISTS migrations`)
+  await query(pool, `DROP TABLE IF EXISTS test_migration, test_idempotent, test_rollback, test_step1, test_step2`)
 })
 
 describe('MigrationRunner', () => {

@@ -79,35 +79,37 @@ export async function dequeueActions(
 export async function checkpointAction(
   tx: pg.PoolClient,
   args: { id: number; step: number; result: unknown },
-): Promise<void> {
-  await query(
+): Promise<boolean> {
+  const result = await query(
     tx,
     `UPDATE actions
      SET steps = steps::jsonb || $1::jsonb, cursor = $2, updated = now()
-     WHERE id = $3`,
+     WHERE id = $3 AND status IN ('pending', 'running')`,
     [JSON.stringify([args.result]), args.step, args.id],
   )
+  return (result.rowCount ?? 0) > 0
 }
 
 export async function completeAction(
   pool: pg.Pool | pg.PoolClient,
   args: { id: number; output?: unknown },
-): Promise<void> {
-  await query(
+): Promise<boolean> {
+  const result = await query(
     pool,
     `UPDATE actions
      SET status = 'completed', output = $1, completed = now(), updated = now()
-     WHERE id = $2`,
+     WHERE id = $2 AND status IN ('pending', 'running')`,
     [args.output ? JSON.stringify(args.output) : null, args.id],
   )
+  return (result.rowCount ?? 0) > 0
 }
 
 export async function failAction(
   pool: pg.Pool | pg.PoolClient,
   args: { id: number; error: unknown },
-): Promise<void> {
+): Promise<boolean> {
   // Fail but auto-retry if under cap
-  await query(
+  const result = await query(
     pool,
     `UPDATE actions
      SET status = CASE WHEN retries + 1 < cap THEN 'pending' ELSE 'failed' END,
@@ -115,9 +117,10 @@ export async function failAction(
          retries = retries + 1,
          started = NULL,
          updated = now()
-     WHERE id = $2`,
+     WHERE id = $2 AND status IN ('pending', 'running')`,
     [JSON.stringify(args.error), args.id],
   )
+  return (result.rowCount ?? 0) > 0
 }
 
 export async function findAction(

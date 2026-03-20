@@ -37,7 +37,7 @@ export interface CompiledCollectionConfig {
   admin?: { group?: string }
 }
 
-function compileField(f: NounSchemaField): CompiledField {
+export function compileField(f: NounSchemaField): CompiledField {
   const base: CompiledField = {
     name: f.name,
     type: f.type,
@@ -66,7 +66,10 @@ function compileField(f: NounSchemaField): CompiledField {
 
     case 'relationship':
     case 'upload':
-      return { ...base, relationTo: f.relationTo!, hasMany: f.hasMany }
+      if (f.relationTo == null) {
+        throw new Error(`Field '${f.name}' of type '${f.type}' requires relationTo`)
+      }
+      return { ...base, relationTo: f.relationTo, hasMany: f.hasMany }
 
     case 'array':
       return {
@@ -105,7 +108,12 @@ export function nounToCollectionConfig(
     .replace(/[^a-z0-9\s-]/g, '')
     .replace(/\s+/g, '-')
     .replace(/-+/g, '-')
+    .replace(/^-+|-+$/g, '')
     .trim()
+
+  if (!slug) {
+    throw new Error(`Invalid noun name '${nounName}': produces empty slug`)
+  }
 
   return {
     slug,
