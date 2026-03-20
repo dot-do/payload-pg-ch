@@ -85,6 +85,27 @@ function normalizeSort(sort: unknown): string | undefined {
  * Payload uses the same operator format so this is mostly a passthrough,
  * but we need to handle the `id` field specially since Payload uses sqid strings.
  */
+/**
+ * Fields that Payload passes in data but should not be persisted.
+ * Official adapters exclude these implicitly (Drizzle via allowlist, Mongoose via strict mode).
+ * Since we store as JSONB, we must explicitly strip them.
+ */
+const NON_PERSISTABLE_FIELDS = new Set([
+  'confirm-password',  // Form validation field, never persist
+  '_strategy',         // Runtime auth context, added after read
+  'collection',        // Stored as a column, not in doc. Added by Payload after read
+])
+
+function sanitizeData(data: Record<string, unknown>): Record<string, unknown> {
+  const clean: Record<string, unknown> = {}
+  for (const [key, value] of Object.entries(data)) {
+    if (!NON_PERSISTABLE_FIELDS.has(key)) {
+      clean[key] = value
+    }
+  }
+  return clean
+}
+
 function decodeSqidValue(value: unknown): unknown {
   if (typeof value === 'string' && value.includes('_')) {
     try { return fromSqid(value).id } catch { return value }
@@ -210,11 +231,10 @@ export function documentDBAdapter(config: DocumentDBAdapterConfig): DatabaseAdap
         // -- CRUD: Create --
 
         create: async (args: CreateArgs) => {
-          const { 'confirm-password': _, ...cleanData } = args.data as Record<string, unknown>
           const result = await adapter.create({
             ns,
             collection: args.collection,
-            data: cleanData,
+            data: sanitizeData(args.data as Record<string, unknown>),
           })
           const doc = typeof result.doc === 'object' && result.doc !== null
             ? result.doc as Record<string, unknown>
@@ -272,12 +292,11 @@ export function documentDBAdapter(config: DocumentDBAdapterConfig): DatabaseAdap
 
           if (!docId) return { id: '' } as Record<string, unknown>
 
-          const { 'confirm-password': _cp, ...cleanUpdateData } = args.data as Record<string, unknown>
           const result = await adapter.updateOne({
             ns,
             collection: args.collection,
             id: docId,
-            data: cleanUpdateData,
+            data: sanitizeData(args.data as Record<string, unknown>),
           })
 
           const doc = typeof result.doc === 'object' && result.doc !== null
