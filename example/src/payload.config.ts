@@ -3,7 +3,7 @@ import { fileURLToPath } from 'url'
 import { buildConfig } from 'payload'
 import { lexicalEditor } from '@payloadcms/richtext-lexical'
 import sharp from 'sharp'
-import { documentDBAdapter } from 'payload-pg-ch'
+import { documentDBAdapter } from '../../dist/payload/database-adapter.js'
 
 import { Users } from './collections/Users'
 import { Posts } from './collections/Posts'
@@ -31,7 +31,7 @@ export default buildConfig({
   },
   db: documentDBAdapter({
     postgres: process.env.POSTGRES_URL!,
-    ns: 1,
+    ns: 'localhost',
   }),
   sharp,
 })

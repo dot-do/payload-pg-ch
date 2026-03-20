@@ -30,10 +30,12 @@ import { createDatabaseAdapter } from 'payload'
 import { DocumentAdapter } from '../adapter.js'
 import type { Where as InternalWhere } from '../types.js'
 import { query } from '../db/pg.js'
+import { fromSqid } from '../id/sqids.js'
 
 export interface DocumentDBAdapterConfig {
   postgres: string
-  ns?: number
+  /** Namespace URI (domain/baseURL). Auto-creates if not found. Default: 'localhost' */
+  ns?: string | number
   collections?: Record<string, { prefix: string }>
 }
 
@@ -83,13 +85,35 @@ function normalizeSort(sort: unknown): string | undefined {
  * Payload uses the same operator format so this is mostly a passthrough,
  * but we need to handle the `id` field specially since Payload uses sqid strings.
  */
+function decodeSqidValue(value: unknown): unknown {
+  if (typeof value === 'string' && value.includes('_')) {
+    try { return fromSqid(value).id } catch { return value }
+  }
+  return value
+}
+
 function convertWhere(where: Where | undefined): InternalWhere | undefined {
   if (!where || Object.keys(where).length === 0) return undefined
 
-  // Deep clone to avoid mutating the original
-  const converted = JSON.parse(JSON.stringify(where)) as InternalWhere
+  const converted = JSON.parse(JSON.stringify(where)) as Record<string, unknown>
 
-  return converted
+  // Recursively decode sqid values in `id` field comparisons
+  function walk(obj: Record<string, unknown>) {
+    for (const [key, val] of Object.entries(obj)) {
+      if (key === 'and' || key === 'or') {
+        if (Array.isArray(val)) val.forEach(v => walk(v as Record<string, unknown>))
+      } else if (key === 'id' && val && typeof val === 'object') {
+        const ops = val as Record<string, unknown>
+        if (ops.equals !== undefined) ops.equals = decodeSqidValue(ops.equals)
+        if (ops.not_equals !== undefined) ops.not_equals = decodeSqidValue(ops.not_equals)
+        if (ops.in && Array.isArray(ops.in)) ops.in = ops.in.map(decodeSqidValue)
+        if (ops.not_in && Array.isArray(ops.not_in)) ops.not_in = ops.not_in.map(decodeSqidValue)
+      }
+    }
+  }
+
+  walk(converted)
+  return converted as InternalWhere
 }
 
 /**
@@ -105,7 +129,8 @@ function toPayloadDoc(result: { id: string } & Record<string, unknown>): Record<
 }
 
 export function documentDBAdapter(config: DocumentDBAdapterConfig): DatabaseAdapterObj {
-  const ns = config.ns ?? 1
+  const nsConfig = config.ns ?? 'localhost'
+  let ns = typeof nsConfig === 'number' ? nsConfig : 0  // resolved on connect
 
   return {
     defaultIDType: 'text',
@@ -126,13 +151,37 @@ export function documentDBAdapter(config: DocumentDBAdapterConfig): DatabaseAdap
 
         connect: async () => {
           await adapter.init()
-          // Ensure DDL schema exists by running a lightweight check
-          // The schema should already be applied, but we verify the data table exists.
+          // Ensure DDL schema exists
           try {
             await query(adapter.pool, 'SELECT 1 FROM data LIMIT 0', [])
           } catch (_e) {
-            // Schema not applied - callers should run sql/pg/*.sql files
-            console.warn('[payload-pg-ch] data table not found. Ensure DDL from sql/pg/*.sql is applied.')
+            console.warn('[payload-pg-ch] data table not found. Run: npm run migrate:up')
+          }
+
+          // Resolve namespace: accept URI string or integer ID
+          if (typeof nsConfig === 'string') {
+            // Look up by URI, auto-create if not found
+            const existing = await query<{ id: number }>(
+              adapter.pool, 'SELECT id FROM ns WHERE uri = $1', [nsConfig],
+            )
+            if (existing.rows.length > 0) {
+              ns = existing.rows[0].id
+              console.log(`[payload-pg-ch] Namespace '${nsConfig}' resolved to id=${ns}`)
+            } else {
+              const created = await query<{ id: number }>(
+                adapter.pool,
+                `INSERT INTO ns (uri, name, kind) VALUES ($1, $2, 'production') RETURNING id`,
+                [nsConfig, nsConfig],
+              )
+              ns = created.rows[0].id
+              console.log(`[payload-pg-ch] Auto-created namespace '${nsConfig}' with id=${ns}`)
+            }
+          } else {
+            // Verify integer ns exists
+            const check = await query<{ id: number }>(adapter.pool, 'SELECT id FROM ns WHERE id = $1', [ns])
+            if (check.rows.length === 0) {
+              throw new Error(`[payload-pg-ch] Namespace id=${ns} not found. Run: npm run migrate:seed`)
+            }
           }
         },
 
