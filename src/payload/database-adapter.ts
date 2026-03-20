@@ -97,17 +97,21 @@ function convertWhere(where: Where | undefined): InternalWhere | undefined {
 
   const converted = JSON.parse(JSON.stringify(where)) as Record<string, unknown>
 
-  // Recursively decode sqid values in `id` field comparisons
+  // Recursively decode sqid string values to integer IDs
+  // This handles: { id: { equals: "usr_xxx" } }, { author: { in: ["usr_xxx"] } }, etc.
+  function decodeOps(ops: Record<string, unknown>) {
+    if (ops.equals !== undefined) ops.equals = decodeSqidValue(ops.equals)
+    if (ops.not_equals !== undefined) ops.not_equals = decodeSqidValue(ops.not_equals)
+    if (ops.in && Array.isArray(ops.in)) ops.in = ops.in.map(decodeSqidValue)
+    if (ops.not_in && Array.isArray(ops.not_in)) ops.not_in = ops.not_in.map(decodeSqidValue)
+  }
+
   function walk(obj: Record<string, unknown>) {
     for (const [key, val] of Object.entries(obj)) {
       if (key === 'and' || key === 'or') {
         if (Array.isArray(val)) val.forEach(v => walk(v as Record<string, unknown>))
-      } else if (key === 'id' && val && typeof val === 'object') {
-        const ops = val as Record<string, unknown>
-        if (ops.equals !== undefined) ops.equals = decodeSqidValue(ops.equals)
-        if (ops.not_equals !== undefined) ops.not_equals = decodeSqidValue(ops.not_equals)
-        if (ops.in && Array.isArray(ops.in)) ops.in = ops.in.map(decodeSqidValue)
-        if (ops.not_in && Array.isArray(ops.not_in)) ops.not_in = ops.not_in.map(decodeSqidValue)
+      } else if (val && typeof val === 'object' && !Array.isArray(val)) {
+        decodeOps(val as Record<string, unknown>)
       }
     }
   }

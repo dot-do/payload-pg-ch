@@ -88,14 +88,14 @@ export function whereToSQL(
   function compile(w: Where): string {
     const parts: string[] = []
 
-    if (w.and) {
-      const andParts = w.and.map(sub => compile(sub))
-      parts.push(`(${andParts.join(' AND ')})`)
+    if (w.and && w.and.length > 0) {
+      const andParts = w.and.map(sub => compile(sub)).filter(Boolean)
+      if (andParts.length > 0) parts.push(`(${andParts.join(' AND ')})`)
     }
 
-    if (w.or) {
-      const orParts = w.or.map(sub => compile(sub))
-      parts.push(`(${orParts.join(' OR ')})`)
+    if (w.or && w.or.length > 0) {
+      const orParts = w.or.map(sub => compile(sub)).filter(Boolean)
+      if (orParts.length > 0) parts.push(`(${orParts.join(' OR ')})`)
     }
 
     for (const [key, value] of Object.entries(w)) {
