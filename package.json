@@ -5,6 +5,9 @@
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
+  "bin": {
+    "payload-pg-ch": "./dist/cli/migrate.js"
+  },
   "exports": {
     ".": {
       "import": "./dist/index.js",
@@ -14,6 +17,12 @@
   "scripts": {
     "build": "tsc",
     "dev": "tsc --watch",
+    "migrate": "node --import tsx src/cli/migrate.ts",
+    "migrate:up": "node --import tsx src/cli/migrate.ts up",
+    "migrate:down": "node --import tsx src/cli/migrate.ts down",
+    "migrate:status": "node --import tsx src/cli/migrate.ts status",
+    "migrate:seed": "node --import tsx src/cli/migrate.ts seed",
+    "migrate:fresh": "node --import tsx src/cli/migrate.ts fresh",
     "test": "vitest run",
     "test:watch": "vitest",
     "test:db:up": "docker compose -f docker-compose.test.yml up -d --wait",
@@ -33,6 +42,7 @@
     "@types/node": "^22.0.0",
     "@types/pg": "^8.11.0",
     "eslint": "^9.0.0",
+    "tsx": "^4.21.0",
     "typescript": "^5.7.0",
     "typescript-eslint": "^8.0.0",
     "vitest": "^3.0.0"
