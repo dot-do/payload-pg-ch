@@ -178,9 +178,9 @@ describe('E2E: Full content management workflow', () => {
     expect(mergedPost1!.title).toBe('Getting Started with Acme (Updated)')
 
     // === 8. Track analytics events ===
-    await adapter.emit({ ns, type: 'page.viewed', meta: { path: '/blog/getting-started' } })
-    await adapter.emit({ ns, type: 'page.viewed', meta: { path: '/blog/design-system' } })
-    await adapter.emit({ ns, type: 'search.query', meta: { query: 'design system', results: 1 } })
+    await adapter.emit({ ns, kind: 'page.viewed', meta: { path: '/blog/getting-started' } })
+    await adapter.emit({ ns, kind: 'page.viewed', meta: { path: '/blog/design-system' } })
+    await adapter.emit({ ns, kind: 'search.query', meta: { query: 'design system', results: 1 } })
 
     // === 9. Queue background jobs ===
     const emailJob = await adapter.enqueue({
@@ -257,12 +257,12 @@ describe('E2E: Multi-tenant isolation', () => {
     expect(t2Posts.docs.every(d => (d.title as string).startsWith('T2'))).toBe(true)
 
     // Emit events for each tenant
-    await adapter.emit({ ns: ns1, type: 'page.viewed' })
-    await adapter.emit({ ns: ns1, type: 'page.viewed' })
-    await adapter.emit({ ns: ns2, type: 'page.viewed' })
+    await adapter.emit({ ns: ns1, kind: 'page.viewed' })
+    await adapter.emit({ ns: ns1, kind: 'page.viewed' })
+    await adapter.emit({ ns: ns2, kind: 'page.viewed' })
 
-    const t1Events = await query(pool, `SELECT id FROM events WHERE ns = $1`, [ns1])
-    const t2Events = await query(pool, `SELECT id FROM events WHERE ns = $1`, [ns2])
+    const t1Events = await query(pool, `SELECT seq FROM events WHERE ns = $1`, [ns1])
+    const t2Events = await query(pool, `SELECT seq FROM events WHERE ns = $1`, [ns2])
 
     // T1: 2 page views (mutations no longer write to events)
     expect(t1Events.rows.length).toBe(2)

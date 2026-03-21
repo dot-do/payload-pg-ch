@@ -100,7 +100,7 @@ describe('payload hooks', () => {
     })
 
     expect(ctx.ns).not.toBeUndefined()
-    expect(ctx.ns!.seq).toBe(ns)
+    expect(ctx.ns!.ns).toBe(ns)
 
     resolver.stop()
   })

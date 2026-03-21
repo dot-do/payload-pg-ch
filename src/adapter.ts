@@ -881,9 +881,10 @@ function relsToDoc(
 /**
  * Build a URL from ns, type, and slug/id.
  */
-function buildUrl(_ns: string, type: string, slugOrId?: string): string | null {
+function buildUrl(ns: string, type: string, slugOrId?: string): string | null {
   if (!slugOrId) return null
-  return `/${type}/${slugOrId}`
+  if (type === 'namespaces') return ns
+  return `${ns}/${type}/${slugOrId}`
 }
 
 /** Fields that belong in the `meta` JSONB column rather than `data` JSONB */
