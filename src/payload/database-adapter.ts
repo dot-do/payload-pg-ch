@@ -101,39 +101,35 @@ function sanitizeData(data: Record<string, unknown>): Record<string, unknown> {
   return clean
 }
 
-function decodeSqidValue(value: unknown): unknown {
-  if (typeof value === 'string' && value.includes('_')) {
-    try { return fromSqid(value).seq } catch { return value }
+/**
+ * Extract the id value from a Payload where clause.
+ * Returns the sqid string if found, undefined otherwise.
+ * Looks in top-level { id: { equals: sqid } } and in nested and/or clauses.
+ */
+function extractIdFromWhere(where: Where | undefined): string | undefined {
+  if (!where) return undefined
+  const idField = where.id as { equals?: unknown } | undefined
+  if (idField?.equals && typeof idField.equals === 'string') {
+    return idField.equals
   }
-  return value
+  // Check nested and/or clauses
+  for (const clause of where.and ?? []) {
+    const nested = extractIdFromWhere(clause)
+    if (nested) return nested
+  }
+  for (const clause of where.or ?? []) {
+    const nested = extractIdFromWhere(clause)
+    if (nested) return nested
+  }
+  return undefined
 }
 
 function convertWhere(where: Where | undefined): InternalWhere | undefined {
   if (!where || Object.keys(where).length === 0) return undefined
-
-  const converted = JSON.parse(JSON.stringify(where)) as Record<string, unknown>
-
-  // Recursively decode sqid string values to integer seq values
-  function decodeOps(ops: Record<string, unknown>) {
-    if (ops.equals !== undefined) ops.equals = decodeSqidValue(ops.equals)
-    if (ops.not_equals !== undefined) ops.not_equals = decodeSqidValue(ops.not_equals)
-    if (ops.in && Array.isArray(ops.in)) ops.in = ops.in.map(decodeSqidValue)
-    if (ops.not_in && Array.isArray(ops.not_in)) ops.not_in = ops.not_in.map(decodeSqidValue)
-  }
-
-  // Only decode sqid values for the `id` field
-  function walk(obj: Record<string, unknown>) {
-    for (const [key, val] of Object.entries(obj)) {
-      if (key === 'and' || key === 'or') {
-        if (Array.isArray(val)) val.forEach(v => walk(v as Record<string, unknown>))
-      } else if (key === 'id' && val && typeof val === 'object' && !Array.isArray(val)) {
-        decodeOps(val as Record<string, unknown>)
-      }
-    }
-  }
-
-  walk(converted)
-  return converted as InternalWhere
+  // The `id` column is TEXT and stores sqid strings directly.
+  // Do NOT decode sqid values to seq — Payload passes sqid strings which
+  // match the id column as-is.
+  return JSON.parse(JSON.stringify(where)) as InternalWhere
 }
 
 /**
@@ -251,6 +247,18 @@ export function documentDBAdapter(config: DocumentDBAdapterConfig): DatabaseAdap
         },
 
         findOne: async <T extends { id: string | number }>(args: FindOneArgs): Promise<T | null> => {
+          // Extract id from where clause for direct lookup (more efficient)
+          const idFromWhere = extractIdFromWhere(args.where)
+          if (idFromWhere) {
+            const result = await adapter.findOne({
+              ns,
+              type: args.collection,
+              id: idFromWhere,
+            })
+            if (!result) return null
+            return toPayloadDoc(result) as T
+          }
+
           const result = await adapter.findOne({
             ns,
             type: args.collection,
@@ -269,13 +277,19 @@ export function documentDBAdapter(config: DocumentDBAdapterConfig): DatabaseAdap
           if ('id' in args && args.id != null) {
             docId = String(args.id)
           } else if ('where' in args && args.where) {
-            const found = await adapter.findOne({
-              ns,
-              type: args.collection,
-              where: convertWhere(args.where) as InternalWhere,
-            })
-            if (!found) return { id: '' } as Record<string, unknown>
-            docId = found.id
+            // Try to extract id directly from where clause first
+            const idFromWhere = extractIdFromWhere(args.where)
+            if (idFromWhere) {
+              docId = idFromWhere
+            } else {
+              const found = await adapter.findOne({
+                ns,
+                type: args.collection,
+                where: convertWhere(args.where) as InternalWhere,
+              })
+              if (!found) return { id: '' } as Record<string, unknown>
+              docId = found.id
+            }
           }
 
           if (!docId) return { id: '' } as Record<string, unknown>
@@ -319,11 +333,11 @@ export function documentDBAdapter(config: DocumentDBAdapterConfig): DatabaseAdap
         // -- CRUD: Delete --
 
         deleteOne: async (args: DeleteOneArgs) => {
-          const found = await adapter.findOne({
-            ns,
-            type: args.collection,
-            where: convertWhere(args.where),
-          })
+          // Extract id from where for direct lookup
+          const idFromWhere = extractIdFromWhere(args.where)
+          const found = idFromWhere
+            ? await adapter.findOne({ ns, type: args.collection, id: idFromWhere })
+            : await adapter.findOne({ ns, type: args.collection, where: convertWhere(args.where) })
 
           if (!found) return { id: '' } as Record<string, unknown>
 
@@ -359,11 +373,10 @@ export function documentDBAdapter(config: DocumentDBAdapterConfig): DatabaseAdap
         // -- Upsert --
 
         upsert: async (args: UpsertArgs) => {
-          const existing = await adapter.findOne({
-            ns,
-            type: args.collection,
-            where: convertWhere(args.where),
-          })
+          const idFromWhere = extractIdFromWhere(args.where)
+          const existing = idFromWhere
+            ? await adapter.findOne({ ns, type: args.collection, id: idFromWhere })
+            : await adapter.findOne({ ns, type: args.collection, where: convertWhere(args.where) })
 
           if (existing) {
             const result = await adapter.updateOne({
@@ -424,7 +437,7 @@ export function documentDBAdapter(config: DocumentDBAdapterConfig): DatabaseAdap
           const result = await adapter.create({
             ns,
             type: '_globals',
-            data: { ...args.data, _globalSlug: args.slug },
+            data: { ...args.data, globalSlug: args.slug, name: args.slug },
           })
           const doc = typeof result.doc === 'object' && result.doc !== null
             ? result.doc as Record<string, unknown>
@@ -433,20 +446,21 @@ export function documentDBAdapter(config: DocumentDBAdapterConfig): DatabaseAdap
         },
 
         findGlobal: async <T extends Record<string, unknown>>(args: FindGlobalArgs): Promise<T> => {
+          // Query by name column which stores the globalSlug
           const result = await adapter.findOne({
             ns,
             type: '_globals',
-            where: { _globalSlug: { equals: args.slug } },
+            where: { name: { equals: args.slug } },
           })
           if (!result) return {} as unknown as T
-          return result as unknown as T
+          return toPayloadDoc(result) as unknown as T
         },
 
         updateGlobal: async <T extends Record<string, unknown>>(args: UpdateGlobalArgs<T>): Promise<T> => {
           const existing = await adapter.findOne({
             ns,
             type: '_globals',
-            where: { _globalSlug: { equals: args.slug } },
+            where: { name: { equals: args.slug } },
           })
 
           if (existing) {
@@ -454,24 +468,24 @@ export function documentDBAdapter(config: DocumentDBAdapterConfig): DatabaseAdap
               ns,
               type: '_globals',
               id: existing.id,
-              data: { ...args.data, _globalSlug: args.slug },
+              data: { ...args.data, globalSlug: args.slug, name: args.slug },
             })
             const doc = typeof result.doc === 'object' && result.doc !== null
               ? result.doc as Record<string, unknown>
               : {}
-            return { id: result.id, ...doc } as unknown as T
+            return toPayloadDoc({ id: result.id, ...doc }) as unknown as T
           }
 
           // If not found, create it
           const result = await adapter.create({
             ns,
             type: '_globals',
-            data: { ...args.data, _globalSlug: args.slug },
+            data: { ...args.data, globalSlug: args.slug, name: args.slug },
           })
           const doc = typeof result.doc === 'object' && result.doc !== null
             ? result.doc as Record<string, unknown>
             : {}
-          return { id: result.id, ...doc } as unknown as T
+          return toPayloadDoc({ id: result.id, ...doc }) as unknown as T
         },
 
         // -- Versions --
@@ -559,12 +573,17 @@ export function documentDBAdapter(config: DocumentDBAdapterConfig): DatabaseAdap
           if ('id' in args && args.id != null) {
             docId = String(args.id)
           } else if ('where' in args && args.where) {
-            const found = await adapter.findOne({
-              ns,
-              type: `_versions_${args.collection}`,
-              where: convertWhere(args.where) as InternalWhere,
-            })
-            if (found) docId = found.id
+            const idFromWhere = extractIdFromWhere(args.where)
+            if (idFromWhere) {
+              docId = idFromWhere
+            } else {
+              const found = await adapter.findOne({
+                ns,
+                type: `_versions_${args.collection}`,
+                where: convertWhere(args.where) as InternalWhere,
+              })
+              if (found) docId = found.id
+            }
           }
 
           if (!docId) {
@@ -709,12 +728,17 @@ export function documentDBAdapter(config: DocumentDBAdapterConfig): DatabaseAdap
           if ('id' in args && args.id != null) {
             docId = String(args.id)
           } else if ('where' in args && args.where) {
-            const found = await adapter.findOne({
-              ns,
-              type: `_versions__globals_${args.global}`,
-              where: convertWhere(args.where) as InternalWhere,
-            })
-            if (found) docId = found.id
+            const idFromWhere = extractIdFromWhere(args.where)
+            if (idFromWhere) {
+              docId = idFromWhere
+            } else {
+              const found = await adapter.findOne({
+                ns,
+                type: `_versions__globals_${args.global}`,
+                where: convertWhere(args.where) as InternalWhere,
+              })
+              if (found) docId = found.id
+            }
           }
 
           if (!docId) {

@@ -57,10 +57,10 @@ describe('E2E: Full chat workflow', () => {
     await adapter.nsResolver.refresh()
 
     // 1. Create user
-    const user = await adapter.create({ ns, nsId, type: 'users', data: { email: 'alice@chat.test', name: 'Alice' } })
+    const user = await adapter.create({ ns, type: 'users', data: { email: 'alice@chat.test', name: 'Alice' } })
 
     // 2. Create chat
-    const chat = await adapter.create({ ns, nsId, type: 'chats', data: { title: 'AI Research', user: fromSqid(user.id).seq } })
+    const chat = await adapter.create({ ns, type: 'chats', data: { title: 'AI Research', user: fromSqid(user.id).seq } })
 
     // 3. Send user message
     const userMsg = await adapter.create({
@@ -82,7 +82,7 @@ describe('E2E: Full chat workflow', () => {
     })
 
     // 5. Vote on response
-    await adapter.create({ ns, nsId, type: 'votes', data: { message: fromSqid(assistantMsg.id).seq, vote: 'up' } })
+    await adapter.create({ ns, type: 'votes', data: { message: fromSqid(assistantMsg.id).seq, vote: 'up' } })
 
     // 6. Create document from chat
     const doc = await adapter.create({
@@ -97,13 +97,13 @@ describe('E2E: Full chat workflow', () => {
     })
 
     // Verify full chain
-    const messages = await adapter.find({ ns, nsId, type: 'messages' })
+    const messages = await adapter.find({ ns, type: 'messages' })
     expect(messages.total).toBe(2)
 
-    const chatDoc = await adapter.findOne({ ns, nsId, type: 'chats', id: chat.id })
+    const chatDoc = await adapter.findOne({ ns, type: 'chats', id: chat.id })
     expect(chatDoc!.user).toBe(user.id)
 
-    const docFound = await adapter.findOne({ ns, nsId, type: 'documents', id: doc.id })
+    const docFound = await adapter.findOne({ ns, type: 'documents', id: doc.id })
     expect(docFound!.chat).toBe(chat.id)
 
   })
@@ -116,16 +116,16 @@ describe('E2E: Paperclip company workflow', () => {
     await adapter.nsResolver.refresh()
 
     // 1. Create company (org)
-    const org = await adapter.create({ ns, nsId, type: 'organizations', data: { name: 'Acme AI Corp' } })
+    const org = await adapter.create({ ns, type: 'organizations', data: { name: 'Acme AI Corp' } })
 
     // 2. Create project
-    const project = await adapter.create({ ns, nsId, type: 'projects', data: { name: 'Platform v2', status: 'active' } })
+    const project = await adapter.create({ ns, type: 'projects', data: { name: 'Platform v2', status: 'active' } })
 
     // 3. Create goal
-    const goal = await adapter.create({ ns, nsId, type: 'goals', data: { title: 'Ship v2 by Q2', project: fromSqid(project.id).seq } })
+    const goal = await adapter.create({ ns, type: 'goals', data: { title: 'Ship v2 by Q2', project: fromSqid(project.id).seq } })
 
     // 4. Create agent
-    const model = await adapter.create({ ns, nsId, type: 'models', data: { name: 'Claude', modelId: 'claude-sonnet-4-6' } })
+    const model = await adapter.create({ ns, type: 'models', data: { name: 'Claude', modelId: 'claude-sonnet-4-6' } })
     const agent = await adapter.create({
       ns, type: 'agents',
       data: { name: 'Dev Agent', model: fromSqid(model.id).seq, config: { maxConcurrency: 1 } },
@@ -147,7 +147,7 @@ describe('E2E: Paperclip company workflow', () => {
       data: { type: 'agent-run', name: 'implement-auth', input: { issueId: fromSqid(issue1.id).seq } },
     })
 
-    const dequeued = await adapter.dequeue({ ns, nsId, type: 'agent-run', limit: 1 })
+    const dequeued = await adapter.dequeue({ ns, type: 'agent-run', limit: 1 })
     expect(dequeued).toHaveLength(1)
 
     await adapter.checkpoint({ id: run.id, step: 1, result: { action: 'read-codebase' } })
@@ -155,35 +155,35 @@ describe('E2E: Paperclip company workflow', () => {
 
     // 7. Cost tracking
     const agentId = fromSqid(agent.id).seq
-    await adapter.create({ ns, nsId, type: 'cost-events', data: { type: 'llm', amount: 500, agent: agentId } })
-    await adapter.create({ ns, nsId, type: 'cost-events', data: { type: 'llm', amount: 300, agent: agentId } })
+    await adapter.create({ ns, type: 'cost-events', data: { type: 'llm', amount: 500, agent: agentId } })
+    await adapter.create({ ns, type: 'cost-events', data: { type: 'llm', amount: 300, agent: agentId } })
 
     // 8. Complete run
     await adapter.complete({ id: run.id, output: { pr: 'https://github.com/acme/platform/pull/42' } })
 
     // 9. Update issue status
-    await adapter.updateOne({ ns, nsId, type: 'issues', id: issue1.id, data: { status: 'done' } })
+    await adapter.updateOne({ ns, type: 'issues', id: issue1.id, data: { status: 'done' } })
 
     // 10. Budget policy
-    await adapter.create({ ns, nsId, type: 'budget-policies', data: { name: 'Monthly Agent Budget', limit: 10000 } })
+    await adapter.create({ ns, type: 'budget-policies', data: { name: 'Monthly Agent Budget', limit: 10000 } })
 
     // 11. Approval for next phase
-    await adapter.create({ ns, nsId, type: 'approvals', data: { title: 'Approve Phase 2 Budget', status: 'pending' } })
+    await adapter.create({ ns, type: 'approvals', data: { title: 'Approve Phase 2 Budget', status: 'pending' } })
 
     // 12. Comment on issue
-    await adapter.create({ ns, nsId, type: 'comments', data: { body: 'Auth implementation complete, PR ready for review' } })
+    await adapter.create({ ns, type: 'comments', data: { body: 'Auth implementation complete, PR ready for review' } })
 
     // Verify the full workflow
-    const issues = await adapter.find({ ns, nsId, type: 'issues' })
+    const issues = await adapter.find({ ns, type: 'issues' })
     expect(issues.total).toBe(2)
 
-    const doneIssues = await adapter.find({ ns, nsId, type: 'issues', where: { status: { equals: 'done' } } })
+    const doneIssues = await adapter.find({ ns, type: 'issues', where: { status: { equals: 'done' } } })
     expect(doneIssues.total).toBe(1)
 
-    const costs = await adapter.find({ ns, nsId, type: 'cost-events' })
+    const costs = await adapter.find({ ns, type: 'cost-events' })
     expect(costs.total).toBe(2)
 
-    const allRuns = await adapter.find({ ns, nsId, type: 'agent-runs' })
+    const allRuns = await adapter.find({ ns, type: 'agent-runs' })
     expect(allRuns.total).toBe(1)
 
   })
@@ -196,17 +196,17 @@ describe('E2E: COW branching with chat and agent collections', () => {
     await adapter.nsResolver.refresh()
 
     // Production: create agent + chat
-    const agent = await adapter.create({ ns, nsId, type: 'agents', data: { name: 'Prod Agent', config: { temperature: 0.5 } } })
-    const chat = await adapter.create({ ns, nsId, type: 'chats', data: { title: 'Prod Chat' } })
+    const agent = await adapter.create({ ns, type: 'agents', data: { name: 'Prod Agent', config: { temperature: 0.5 } } })
+    const chat = await adapter.create({ ns, type: 'chats', data: { title: 'Prod Chat' } })
 
     // Create branch
     const branch = await adapter.createBranch({ parentNs: ns, ns: 'cow-e2e.test/pr/1', branch: 'feat/hot-agent' })
     await adapter.nsResolver.refresh()
 
     // Branch: inherits agent + chat
-    const branchAgents = await adapter.find({ ns, branch.ns, type: 'agents' })
+    const branchAgents = await adapter.find({ ns: branch.ns, type: 'agents' })
     expect(branchAgents.total).toBe(1)
-    const branchChats = await adapter.find({ ns, branch.ns, type: 'chats' })
+    const branchChats = await adapter.find({ ns: branch.ns, type: 'chats' })
     expect(branchChats.total).toBe(1)
 
     // Modify agent config in branch (COW fork)
@@ -222,11 +222,11 @@ describe('E2E: COW branching with chat and agent collections', () => {
     })
 
     // Branch sees modified agent
-    const branchAgent = await adapter.findOne({ ns, branch.ns, type: 'agents', id: agent.id })
+    const branchAgent = await adapter.findOne({ ns: branch.ns, type: 'agents', id: agent.id })
     expect((branchAgent!.config as Record<string, unknown>).temperature).toBe(0.9)
 
     // Production unchanged
-    const prodAgent = await adapter.findOne({ ns, nsId, type: 'agents', id: agent.id })
+    const prodAgent = await adapter.findOne({ ns, type: 'agents', id: agent.id })
     expect((prodAgent!.config as Record<string, unknown>).temperature).toBe(0.5)
 
     // Merge branch → production
@@ -234,7 +234,7 @@ describe('E2E: COW branching with chat and agent collections', () => {
     expect(result.merged).toBeGreaterThan(0)
 
     // Production now has the hot agent config
-    const mergedAgent = await adapter.findOne({ ns, nsId, type: 'agents', id: agent.id })
+    const mergedAgent = await adapter.findOne({ ns, type: 'agents', id: agent.id })
     expect((mergedAgent!.config as Record<string, unknown>).temperature).toBe(0.9)
   })
 })

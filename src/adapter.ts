@@ -146,11 +146,9 @@ export class DocumentAdapter {
       // Now that we have the seq, generate the sqid and set it as the id
       const sqid = toSqid(args.type, row.seq, args.ns, row.created, row.rand)
 
-      // Update the id column with the sqid if it was not pre-set
-      if (!row.id) {
-        await query(tx, `UPDATE data SET id = $1 WHERE seq = $2`, [sqid, row.seq])
-        row.id = sqid
-      }
+      // Update the id column with the sqid (always, since we insert with a temp id)
+      await query(tx, `UPDATE data SET id = $1 WHERE seq = $2`, [sqid, row.seq])
+      row.id = sqid
 
       // Also update url if it was built with a placeholder
       if (!row.url) {
