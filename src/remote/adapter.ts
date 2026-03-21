@@ -1,4 +1,4 @@
-import type { DatabaseAdapterObj, Payload } from 'payload'
+import type { DatabaseAdapterObj, Payload, JsonObject, TypeWithVersion, UpdateGlobalVersionArgs } from 'payload'
 import { createDatabaseAdapter } from 'payload'
 import type { BaseDatabaseAdapter, PaginatedDocs } from 'payload'
 import type { RemoteAdapterConfig } from './client.js'
@@ -362,7 +362,7 @@ export function remoteDBAdapter(config: RemoteAdapterConfig): DatabaseAdapterObj
           }
         },
 
-        findVersions: async <T = unknown>(fvArgs: { collection: string; where?: Record<string, unknown>; sort?: unknown; page?: number; limit?: number }): Promise<PaginatedDocs<any>> => {
+        findVersions: async (fvArgs: { collection: string; where?: Record<string, unknown>; sort?: unknown; page?: number; limit?: number }): Promise<PaginatedDocs<any>> => {
           const page = fvArgs.page ?? 1
           const limit = fvArgs.limit ?? 10
           const offset = (page - 1) * limit
@@ -373,7 +373,7 @@ export function remoteDBAdapter(config: RemoteAdapterConfig): DatabaseAdapterObj
           const docs = result.docs.map(d => ({
             id: d.id,
             parent: (d.parent as string) ?? '',
-            version: d.version ?? {},
+            version: (d.version ?? {}) as never,
             createdAt: (d.createdAt as string) ?? (d.created as string) ?? new Date().toISOString(),
             updatedAt: (d.updatedAt as string) ?? (d.updated as string) ?? new Date().toISOString(),
             latest: (d.latest as boolean) ?? false,
@@ -383,7 +383,7 @@ export function remoteDBAdapter(config: RemoteAdapterConfig): DatabaseAdapterObj
           return paginate(docs, result.total, page, limit)
         },
 
-        updateVersion: async (uvArgs) => {
+        updateVersion: async (uvArgs): Promise<any> => {
           let docId: string | undefined
           if ('id' in uvArgs && uvArgs.id != null) {
             docId = String(uvArgs.id)
@@ -481,7 +481,7 @@ export function remoteDBAdapter(config: RemoteAdapterConfig): DatabaseAdapterObj
           }
         },
 
-        findGlobalVersions: async <T = unknown>(fgvArgs: { global: string; where?: Record<string, unknown>; sort?: unknown; page?: number; limit?: number }): Promise<PaginatedDocs<any>> => {
+        findGlobalVersions: async <T = JsonObject>(fgvArgs: { global: string; where?: Record<string, unknown>; sort?: unknown; page?: number; limit?: number }): Promise<PaginatedDocs<TypeWithVersion<T>>> => {
           const page = fgvArgs.page ?? 1
           const limit = fgvArgs.limit ?? 10
           const offset = (page - 1) * limit
@@ -492,7 +492,7 @@ export function remoteDBAdapter(config: RemoteAdapterConfig): DatabaseAdapterObj
           const docs = result.docs.map(d => ({
             id: d.id,
             parent: (d.parent as string) ?? '',
-            version: d.version ?? {},
+            version: (d.version ?? {}) as never,
             createdAt: (d.createdAt as string) ?? (d.created as string) ?? new Date().toISOString(),
             updatedAt: (d.updatedAt as string) ?? (d.updated as string) ?? new Date().toISOString(),
             latest: (d.latest as boolean) ?? false,
@@ -501,7 +501,7 @@ export function remoteDBAdapter(config: RemoteAdapterConfig): DatabaseAdapterObj
           return paginate(docs, result.total, page, limit)
         },
 
-        updateGlobalVersion: async (ugvArgs) => {
+        updateGlobalVersion: async <T extends JsonObject = JsonObject>(ugvArgs: UpdateGlobalVersionArgs<T>): Promise<TypeWithVersion<T>> => {
           let docId: string | undefined
           if ('id' in ugvArgs && ugvArgs.id != null) {
             docId = String(ugvArgs.id)
@@ -538,7 +538,7 @@ export function remoteDBAdapter(config: RemoteAdapterConfig): DatabaseAdapterObj
           return {
             id: result.id,
             parent: (doc.parent as string) ?? '',
-            version: doc.version ?? ugvArgs.versionData.version,
+            version: (doc.version ?? ugvArgs.versionData.version) as T,
             createdAt: (doc.createdAt as string) ?? new Date().toISOString(),
             updatedAt: (doc.updatedAt as string) ?? new Date().toISOString(),
             latest: (doc.latest as boolean) ?? false,

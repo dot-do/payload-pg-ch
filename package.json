@@ -12,6 +12,10 @@
     ".": {
       "import": "./dist/index.js",
       "types": "./dist/index.d.ts"
+    },
+    "./remote": {
+      "import": "./dist/remote/index.js",
+      "types": "./dist/remote/index.d.ts"
     }
   },
   "scripts": {
