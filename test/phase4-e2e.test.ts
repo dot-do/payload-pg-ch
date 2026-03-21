@@ -107,9 +107,6 @@ describe('E2E: Full chat workflow', () => {
     const docFound = await adapter.findOne({ ns: nsId, collection: 'documents', id: doc.id })
     expect(docFound!.chat).toBe(chat.id)
 
-    // Verify log trail
-    const logs = await query<{ kind: string }>(pool, `SELECT kind FROM log WHERE ns = $1`, [nsId])
-    expect(logs.rows.length).toBeGreaterThanOrEqual(7)
   })
 })
 
@@ -191,9 +188,6 @@ describe('E2E: Paperclip company workflow', () => {
     const allRuns = await adapter.find({ ns: nsId, collection: 'agent-runs' })
     expect(allRuns.total).toBe(1)
 
-    // Audit trail
-    const logs = await query<{ kind: string }>(pool, `SELECT kind FROM log WHERE ns = $1`, [nsId])
-    expect(logs.rows.length).toBeGreaterThanOrEqual(10)
   })
 })
 

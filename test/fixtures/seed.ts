@@ -73,11 +73,11 @@ export async function seedTestData(pool: pg.Pool): Promise<{
     [nsId, postId, categoryId],
   )
 
-  // Create a log entry
+  // Create an event entry (non-mutation events only; CDC handles mutations)
   await query(
     pool,
-    `INSERT INTO log (ns, kind, entity, collection, actor, doc, rand)
-     VALUES ($1, 'data.created', $2, 'posts', $3, '{"title":"Hello World"}', 34567)`,
+    `INSERT INTO events (ns, kind, entity, collection, actor, meta)
+     VALUES ($1, 'seed.completed', $2, 'posts', $3, '{"source":"seed"}')`,
     [nsId, postId, userId],
   )
 

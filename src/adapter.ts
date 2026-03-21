@@ -8,8 +8,7 @@ import { NsResolver } from './ns/resolver.js'
 import { createBranch, mergeBranch } from './ns/branch.js'
 import { insertData, updateData, deleteData, findData, findOneData, findDataCOW } from './db/queries/data.js'
 import { insertRel, deleteRelsForEntity, findRelsFrom, findRelsTo, extractRels } from './db/queries/rels.js'
-import { insertLog, emit } from './db/queries/log.js'
-import { insertPending } from './db/queries/pending.js'
+import { emit } from './db/queries/events.js'
 import { enqueueAction, dequeueActions, checkpointAction, completeAction, failAction, findAction } from './db/queries/actions.js'
 
 const COLLECTION_TIER: Record<string, CollectionTier> = {
@@ -21,11 +20,6 @@ const COLLECTION_TIER: Record<string, CollectionTier> = {
 // Collections backed by the `actions` table instead of `data`
 const ACTIONS_COLLECTIONS = new Set(['agent-runs'])
 
-// Collections that emit version.created log entries on update
-const VERSIONED_COLLECTIONS = new Set([
-  'nouns', 'documents', 'agents', 'prompts', 'tools', 'functions',
-  'workflows', 'components', 'budget-policies',
-])
 
 interface CollectionDef {
   slug: string
@@ -127,13 +121,15 @@ export class DocumentAdapter {
 
     const rand = generateRand()
     const fields = this.getFields(args.collection)
+    const { doc, meta } = splitMeta(args.data)
 
     return transaction(this.pool, async (tx) => {
       const row = await insertData(tx, {
         ns: args.ns,
         collection: args.collection,
         slug: args.data.slug as string | undefined,
-        doc: args.data,
+        doc,
+        meta: Object.keys(meta).length > 0 ? meta : undefined,
         status: args.data.status as string | undefined,
         locale: args.data.locale as string | undefined,
         rand,
@@ -150,27 +146,6 @@ export class DocumentAdapter {
           sort: rel.sort,
         })
       }
-
-      // Log entry
-      await insertLog(tx, {
-        ns: args.ns,
-        kind: 'data.created',
-        entity: row.id,
-        collection: args.collection,
-        actor: args.actor,
-        doc: args.data,
-        meta: args.meta,
-        rand,
-      })
-
-      // Pending row for search indexing
-      await insertPending(tx, {
-        ns: args.ns,
-        entity: row.id,
-        collection: args.collection,
-        title: args.data.title as string | undefined,
-        body: extractBody(args.data),
-      })
 
       return { id: this.rowToSqid(row), doc: args.data }
     })
@@ -315,10 +290,9 @@ export class DocumentAdapter {
     const docs = result.rows.map((row) => {
       const doc = typeof row.doc === 'string' ? JSON.parse(row.doc) : row.doc
       const rels = relsMap.get(row.id) ?? []
-      const { _parent: _, ...cleanDoc } = doc as Record<string, unknown>
       return {
         id: this.rowToSqid(row),
-        ...cleanDoc,
+        ...(doc as Record<string, unknown>),
         ...relsToDoc(rels, this.nsResolver),
       } as { id: Sqid } & Record<string, unknown>
     })
@@ -349,18 +323,18 @@ export class DocumentAdapter {
         // Check if doc is tombstoned in this branch
         const tombstone = await query<{ hidden: number }>(
           this.pool,
-          `SELECT 1 AS hidden FROM data WHERE ns = $1 AND collection = '_tombstone' AND (doc->>'_parent')::bigint = $2`,
+          `SELECT 1 AS hidden FROM data WHERE ns = $1 AND collection = '_tombstone' AND (meta->>'_parent')::bigint = $2`,
           [args.ns, id],
         )
         if (tombstone.rows.length > 0) {
           // Doc was deleted in this branch — return null
           row = null
         } else {
-          // Look for a forked doc with _parent pointing to this id
+          // Look for a forked doc with _parent pointing to this id (stored in meta)
           const forked = await query<DataRow>(
             this.pool,
-            `SELECT * FROM data WHERE ns = $1 AND doc->>'_parent' = $2 LIMIT 1`,
-            [args.ns, String(id)],
+            `SELECT * FROM data WHERE ns = $1 AND (meta->>'_parent')::bigint = $2 LIMIT 1`,
+            [args.ns, id],
           )
           if (forked.rows[0]) {
             row = forked.rows[0]
@@ -394,12 +368,11 @@ export class DocumentAdapter {
 
     if (!row) return null
 
-    const rawDoc = typeof row.doc === 'string' ? JSON.parse(row.doc) : row.doc
-    const { _parent: _, ...doc } = rawDoc as Record<string, unknown>
+    const doc = typeof row.doc === 'string' ? JSON.parse(row.doc) : row.doc
     const rels = await fetchRelsWithTargets(this.pool, row.id, args.ns)
     return {
       id: this.rowToSqid(row),
-      ...doc,
+      ...(doc as Record<string, unknown>),
       ...relsToDoc(rels, this.nsResolver),
     }
   }
@@ -423,11 +396,11 @@ export class DocumentAdapter {
       if (ns?.parent) {
         let exists = await findOneData(tx, { ns: args.ns, id: intId })
         if (!exists) {
-          // Check if we already forked this doc (forked doc has _parent = intId)
+          // Check if we already forked this doc (forked doc has _parent in meta)
           const forkedResult = await query<DataRow>(
             tx,
-            `SELECT * FROM data WHERE ns = $1 AND doc->>'_parent' = $2 LIMIT 1`,
-            [args.ns, String(intId)],
+            `SELECT * FROM data WHERE ns = $1 AND (meta->>'_parent')::bigint = $2 LIMIT 1`,
+            [args.ns, intId],
           )
           if (forkedResult.rows[0]) {
             exists = forkedResult.rows[0]
@@ -438,12 +411,12 @@ export class DocumentAdapter {
           const parentDoc = await findOneData(tx, { ns: ns.parent, id: intId })
           if (parentDoc) {
             const parentDocObj = typeof parentDoc.doc === 'string' ? JSON.parse(parentDoc.doc) : parentDoc.doc
-            const forkedDoc = { ...parentDocObj, _parent: parentDoc.id }
             const forkedRow = await insertData(tx, {
               ns: args.ns,
               collection: parentDoc.collection,
               slug: parentDoc.slug,
-              doc: forkedDoc,
+              doc: parentDocObj,
+              meta: { _parent: parentDoc.id },
               status: parentDoc.status,
               locale: parentDoc.locale,
               rand: parentDoc.rand,
@@ -457,18 +430,20 @@ export class DocumentAdapter {
       const current = await findOneData(tx, { ns: args.ns, id: workingId })
       const currentDoc = current ? (typeof current.doc === 'string' ? JSON.parse(current.doc) : current.doc) : {}
       const merged = { ...currentDoc, ...args.data }
+      const { doc: mergedDoc, meta: mergedMeta } = splitMeta(merged)
 
       const row = await updateData(tx, {
         ns: args.ns,
         id: workingId,
-        doc: merged,
+        doc: mergedDoc,
+        meta: Object.keys(mergedMeta).length > 0 ? mergedMeta : undefined,
         status: args.data.status as string | undefined,
         locale: args.data.locale as string | undefined,
       })
 
       // Rebuild relationships
       await deleteRelsForEntity(tx, { ns: args.ns, from: workingId })
-      const rels = extractRels(merged, fields)
+      const rels = extractRels(mergedDoc, fields)
       for (const rel of rels) {
         await insertRel(tx, {
           ns: args.ns,
@@ -479,44 +454,7 @@ export class DocumentAdapter {
         })
       }
 
-      // Log
-      await insertLog(tx, {
-        ns: args.ns,
-        kind: 'data.updated',
-        entity: workingId,
-        collection: args.collection,
-        actor: args.actor,
-        doc: merged,
-        diff: args.data,
-        meta: args.meta,
-        rand: row.rand,
-      })
-
-      // Version log for versioned collections
-      if (VERSIONED_COLLECTIONS.has(args.collection)) {
-        await insertLog(tx, {
-          ns: args.ns,
-          kind: 'version.created',
-          entity: workingId,
-          collection: args.collection,
-          actor: args.actor,
-          doc: merged,
-          meta: args.meta,
-          rand: row.rand,
-        })
-      }
-
-      // Pending for search reindex
-      await insertPending(tx, {
-        ns: args.ns,
-        entity: workingId,
-        collection: args.collection,
-        title: merged.title as string | undefined,
-        body: extractBody(merged),
-      })
-
-      const { _parent: _, ...cleanMerged } = merged
-      return { id: this.rowToSqid(row), doc: cleanMerged }
+      return { id: this.rowToSqid(row), doc: mergedDoc }
     })
   }
 
@@ -547,8 +485,8 @@ export class DocumentAdapter {
       let deleted = 0
       for (const row of result.rows) {
         if (ns?.parent) {
-          const rowDoc = typeof row.doc === 'string' ? JSON.parse(row.doc) : row.doc
-          const hasParent = rowDoc && typeof rowDoc === 'object' && '_parent' in rowDoc
+          const rowMeta = row.meta as Record<string, unknown> | null
+          const hasParent = rowMeta && '_parent' in rowMeta
           if (row.ns === args.ns && !hasParent) {
             // Branch-created doc (no _parent): delete the actual row
             await deleteData(tx, { ns: args.ns, id: row.id })
@@ -557,30 +495,14 @@ export class DocumentAdapter {
             await insertData(tx, {
               ns: args.ns,
               collection: '_tombstone',
-              doc: { _parent: row.id, _deleted: true },
+              doc: {},
+              meta: { _parent: row.id, _deleted: true },
               rand: 0,
             })
           }
         } else {
           await deleteData(tx, { ns: args.ns, id: row.id })
         }
-
-        await insertLog(tx, {
-          ns: args.ns,
-          kind: 'data.deleted',
-          entity: row.id,
-          collection: args.collection,
-          actor: args.actor,
-          meta: args.meta,
-          rand: row.rand,
-        })
-
-        // Pending row for search de-indexing
-        await insertPending(tx, {
-          ns: args.ns,
-          entity: row.id,
-          collection: args.collection,
-        })
 
         deleted++
       }
@@ -818,15 +740,6 @@ export class DocumentAdapter {
 
 // --- Helpers ---
 
-function extractBody(doc: Record<string, unknown>): string | undefined {
-  const parts: string[] = []
-  if (typeof doc.title === 'string') parts.push(doc.title)
-  if (typeof doc.description === 'string') parts.push(doc.description)
-  if (typeof doc.content === 'string') parts.push(doc.content)
-  if (typeof doc.body === 'string') parts.push(doc.body)
-  return parts.length > 0 ? parts.join('\n') : undefined
-}
-
 interface RelWithTarget extends RelRow {
   targetCollection: string
   targetCreated: Date
@@ -938,4 +851,24 @@ function relsToDoc(
   }
 
   return result
+}
+
+/** Fields that belong in the `meta` JSONB column rather than `doc` JSON */
+const META_FIELDS = new Set(['_parent', '_globalSlug'])
+
+/**
+ * Split adapter-internal fields into `meta` and user content into `doc`.
+ * `meta` is stored as JSONB (queryable), `doc` is stored as JSON (preserves key order).
+ */
+function splitMeta(data: Record<string, unknown>): { doc: Record<string, unknown>; meta: Record<string, unknown> } {
+  const doc: Record<string, unknown> = {}
+  const meta: Record<string, unknown> = {}
+  for (const [key, value] of Object.entries(data)) {
+    if (META_FIELDS.has(key)) {
+      meta[key] = value
+    } else {
+      doc[key] = value
+    }
+  }
+  return { doc, meta }
 }

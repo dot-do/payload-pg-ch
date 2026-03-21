@@ -195,19 +195,12 @@ describe('Budget policies with enforcement', () => {
 
 // BEAD 2e8: Typed event emission
 describe('Typed event emission', () => {
-  it('all CRUD operations emit correctly typed log entries', async () => {
-    const chat = await adapter.create({ ns: nsId, collection: 'chats', data: { title: 'Event Chat' } })
-    await adapter.updateOne({ ns: nsId, collection: 'chats', id: chat.id, data: { title: 'Renamed' } })
-    await adapter.deleteMany({ ns: nsId, collection: 'chats', where: { title: { equals: 'Renamed' } } })
-
+  it('emit writes non-mutation events to events table', async () => {
     await adapter.emit({ ns: nsId, kind: 'page.viewed', meta: { path: '/test' } })
     await adapter.emit({ ns: nsId, kind: 'search.query', meta: { query: 'test' } })
 
-    const logs = await query<{ kind: string }>(pool, `SELECT kind FROM log WHERE ns = $1 ORDER BY created`, [nsId])
-    const kinds = logs.rows.map(r => r.kind)
-    expect(kinds).toContain('data.created')
-    expect(kinds).toContain('data.updated')
-    expect(kinds).toContain('data.deleted')
+    const events = await query<{ kind: string }>(pool, `SELECT kind FROM events WHERE ns = $1 ORDER BY created`, [nsId])
+    const kinds = events.rows.map(r => r.kind)
     expect(kinds).toContain('page.viewed')
     expect(kinds).toContain('search.query')
   })
@@ -363,7 +356,8 @@ describe('E2E: Agent lifecycle with cost tracking', () => {
     const memories = await adapter.find({ ns: nsId, collection: 'memories' })
     expect(memories.total).toBe(1)
 
-    const logs = await query<{ kind: string }>(pool, `SELECT kind FROM log WHERE ns = $1`, [nsId])
-    expect(logs.rows.length).toBeGreaterThan(5) // Multiple CRUD operations logged
+    // Verify the agent session was closed
+    const closedSession = await adapter.findOne({ ns: nsId, collection: 'agent-sessions', id: session.id })
+    expect(closedSession!.status).toBe('closed')
   })
 })

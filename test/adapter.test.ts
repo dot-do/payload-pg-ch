@@ -272,107 +272,37 @@ describe('relationships', () => {
   })
 })
 
-describe('log entries', () => {
-  it('creates log entry for every create', async () => {
-    await adapter.create({ ns: nsId, collection: 'posts', data: { title: 'Logged' } })
 
-    const logs = await query<{ kind: string; collection: string; doc: unknown }>(
-      pool,
-      `SELECT kind, collection, doc FROM log WHERE ns = $1 ORDER BY created`,
-      [nsId],
-    )
-
-    expect(logs.rows).toHaveLength(1)
-    expect(logs.rows[0].kind).toBe('data.created')
-    expect(logs.rows[0].collection).toBe('posts')
-    const doc = logs.rows[0].doc as Record<string, unknown>
-    expect(doc.title).toBe('Logged')
-  })
-
-  it('creates log entry for update', async () => {
-    const post = await adapter.create({ ns: nsId, collection: 'posts', data: { title: 'V1' } })
-    await adapter.updateOne({ ns: nsId, collection: 'posts', id: post.id, data: { title: 'V2' } })
-
-    const logs = await query<{ kind: string; doc: unknown; diff: unknown }>(
-      pool,
-      `SELECT kind, doc, diff FROM log WHERE ns = $1 ORDER BY created`,
-      [nsId],
-    )
-
-    expect(logs.rows).toHaveLength(2)
-    expect(logs.rows[0].kind).toBe('data.created')
-    expect(logs.rows[1].kind).toBe('data.updated')
-    const diff = logs.rows[1].diff as Record<string, unknown>
-    expect(diff.title).toBe('V2')
-  })
-
-  it('creates log entry for delete', async () => {
-    await adapter.create({ ns: nsId, collection: 'posts', data: { title: 'To Delete' } })
-    await adapter.deleteMany({ ns: nsId, collection: 'posts', where: { title: { equals: 'To Delete' } } })
-
-    const logs = await query<{ kind: string }>(
-      pool,
-      `SELECT kind FROM log WHERE ns = $1 ORDER BY created`,
-      [nsId],
-    )
-
-    expect(logs.rows).toHaveLength(2)
-    expect(logs.rows[1].kind).toBe('data.deleted')
-  })
-
-  it('log entries include actor and meta', async () => {
-    await adapter.create({
-      ns: nsId,
-      collection: 'posts',
-      data: { title: 'With Meta' },
-      actor: 42,
-      meta: { ip: '127.0.0.1', agent: 'test', method: 'POST', path: '/api/posts' },
-    })
-
-    const logs = await query<{ actor: number; meta: unknown }>(
-      pool,
-      `SELECT actor, meta FROM log WHERE ns = $1`,
-      [nsId],
-    )
-
-    expect(logs.rows[0].actor).toBe(42)
-    const meta = logs.rows[0].meta as Record<string, unknown>
-    expect(meta.ip).toBe('127.0.0.1')
-  })
-})
-
-describe('pending rows', () => {
-  it('creates pending row for search indexing on create', async () => {
+describe('embedding NULL for new/updated docs', () => {
+  it('new docs have NULL embedding (indexer will pick them up)', async () => {
     await adapter.create({
       ns: nsId,
       collection: 'posts',
       data: { title: 'Index Me', body: 'Some content' },
     })
 
-    const pending = await query<{ entity: number; collection: string; title: string; status: string }>(
+    const rows = await query<{ embedding: unknown }>(
       pool,
-      `SELECT entity, collection, title, status FROM pending WHERE ns = $1`,
+      `SELECT embedding FROM data WHERE ns = $1 AND collection = 'posts'`,
       [nsId],
     )
 
-    expect(pending.rows).toHaveLength(1)
-    expect(pending.rows[0].collection).toBe('posts')
-    expect(pending.rows[0].title).toBe('Index Me')
-    expect(pending.rows[0].status).toBe('pending')
+    expect(rows.rows).toHaveLength(1)
+    expect(rows.rows[0].embedding).toBeNull()
   })
 
-  it('creates pending row on update', async () => {
+  it('updated docs reset embedding to NULL', async () => {
     const post = await adapter.create({ ns: nsId, collection: 'posts', data: { title: 'V1' } })
     await adapter.updateOne({ ns: nsId, collection: 'posts', id: post.id, data: { title: 'V2' } })
 
-    const pending = await query<{ title: string }>(
+    const rows = await query<{ embedding: unknown }>(
       pool,
-      `SELECT title FROM pending WHERE ns = $1 ORDER BY created`,
+      `SELECT embedding FROM data WHERE ns = $1 AND collection = 'posts'`,
       [nsId],
     )
 
-    expect(pending.rows).toHaveLength(2)
-    expect(pending.rows[1].title).toBe('V2')
+    expect(rows.rows).toHaveLength(1)
+    expect(rows.rows[0].embedding).toBeNull()
   })
 })
 
@@ -496,21 +426,21 @@ describe('namespace resolution', () => {
 })
 
 describe('emit fire-and-forget events', () => {
-  it('writes to log table', async () => {
+  it('writes to events table', async () => {
     await adapter.emit({
       ns: nsId,
       kind: 'page.viewed',
       meta: { path: '/blog/hello', referrer: 'google.com' },
     })
 
-    const logs = await query<{ kind: string; meta: unknown }>(
+    const events = await query<{ kind: string; meta: unknown }>(
       pool,
-      `SELECT kind, meta FROM log WHERE ns = $1 AND kind = 'page.viewed'`,
+      `SELECT kind, meta FROM events WHERE ns = $1 AND kind = 'page.viewed'`,
       [nsId],
     )
 
-    expect(logs.rows).toHaveLength(1)
-    const meta = logs.rows[0].meta as Record<string, unknown>
+    expect(events.rows).toHaveLength(1)
+    const meta = events.rows[0].meta as Record<string, unknown>
     expect(meta.path).toBe('/blog/hello')
   })
 
@@ -526,15 +456,15 @@ describe('emit fire-and-forget events', () => {
       meta: { model: 'gemini-2', tokens: 1200 },
     })
 
-    const logs = await query<{ kind: string; entity: number; actor: number }>(
+    const events = await query<{ kind: string; entity: number; actor: number }>(
       pool,
-      `SELECT kind, entity, actor FROM log WHERE ns = $1 AND kind = 'ai.generated'`,
+      `SELECT kind, entity, actor FROM events WHERE ns = $1 AND kind = 'ai.generated'`,
       [nsId],
     )
 
-    expect(logs.rows).toHaveLength(1)
-    expect(logs.rows[0].entity).toBe(entityId)
-    expect(logs.rows[0].actor).toBe(99)
+    expect(events.rows).toHaveLength(1)
+    expect(events.rows[0].entity).toBe(entityId)
+    expect(events.rows[0].actor).toBe(99)
   })
 })
 

@@ -1,78 +1,63 @@
-CREATE TABLE ns (
-  id            BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-  uri           TEXT NOT NULL UNIQUE,
-  name          TEXT,
-  config        JSON,
-  plan          TEXT DEFAULT 'free',
-
-  -- hierarchy / branching
-  parent        BIGINT REFERENCES ns(id),
-  kind          TEXT NOT NULL DEFAULT 'production',
-  ttl           INTERVAL,
-  merged        TIMESTAMPTZ,
-  pr            INT,
-
-  -- WorkOS
-  workosorg     TEXT,
-
-  -- Stripe
-  stripe        TEXT,
-  connect       TEXT,
-  subscription  TEXT,
-  onboarded     BOOLEAN DEFAULT false,
-
-  -- GitHub
-  githuborgid   BIGINT,
-  githubuserid  BIGINT,
-  repo          TEXT,
-  branch        TEXT DEFAULT 'main',
-  root          TEXT DEFAULT '/',
-  synced        TIMESTAMPTZ,
-  commit        TEXT,
-
-  created       TIMESTAMPTZ NOT NULL DEFAULT now(),
-  updated       TIMESTAMPTZ NOT NULL DEFAULT now()
-);
-
-CREATE INDEX idx_ns_uri ON ns(uri);
-CREATE INDEX idx_ns_parent ON ns(parent) WHERE parent IS NOT NULL;
-CREATE INDEX idx_ns_kind ON ns(kind) WHERE kind != 'production';
-CREATE INDEX idx_ns_workosorg ON ns(workosorg) WHERE workosorg IS NOT NULL;
-CREATE INDEX idx_ns_stripe ON ns(stripe) WHERE stripe IS NOT NULL;
-CREATE INDEX idx_ns_github ON ns(githuborgid) WHERE githuborgid IS NOT NULL;
-CREATE INDEX idx_ns_repo ON ns(repo) WHERE repo IS NOT NULL;
 CREATE TABLE data (
-  id            BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-  ns            BIGINT NOT NULL REFERENCES ns(id),
-  collection    TEXT NOT NULL,
+  seq           BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  id            TEXT NOT NULL,
+  ns            TEXT NOT NULL,
+  type          TEXT NOT NULL,
+  name          TEXT,
   slug          TEXT,
-  doc           JSONB NOT NULL,
+  url           TEXT,
+  mdx           TEXT,
+  data          JSONB,
+  code          TEXT,
+  meta          JSONB NOT NULL DEFAULT '{}',
   status        TEXT,
   locale        TEXT,
+  version       BIGINT NOT NULL DEFAULT 1,
   rand          INT NOT NULL,
   created       TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated       TIMESTAMPTZ NOT NULL DEFAULT now(),
-  embedding     vector(768)
+  embedding     vector(768),
+
+  UNIQUE(ns, id),
+  UNIQUE(url)
 );
 
 CREATE INDEX idx_data_ns ON data(ns);
-CREATE INDEX idx_data_ns_collection_created ON data (ns, collection, created DESC);
-CREATE INDEX idx_data_slug ON data(ns, collection, slug);
+CREATE INDEX idx_data_ns_type_created ON data (ns, type, created DESC);
+CREATE INDEX idx_data_slug ON data(ns, type, slug);
 CREATE INDEX idx_data_status ON data(status) WHERE status IS NOT NULL;
+CREATE INDEX idx_data_meta ON data USING GIN (meta);
+CREATE INDEX idx_data_jsonb ON data USING GIN (data);
 CREATE INDEX idx_data_embedding ON data USING hnsw (embedding vector_cosine_ops)
   WITH (m = 16, ef_construction = 64);
+CREATE TABLE rels (
+  seq           BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  ns            TEXT NOT NULL,
+  "from"        BIGINT NOT NULL REFERENCES data(seq) ON DELETE CASCADE,
+  "to"          BIGINT NOT NULL REFERENCES data(seq) ON DELETE CASCADE,
+  path          TEXT NOT NULL,
+  sort          INT NOT NULL DEFAULT 0,
+  meta          JSONB,
+
+  UNIQUE("from", path, "to")
+);
+
+CREATE INDEX idx_rels_from ON rels("from", path);
+CREATE INDEX idx_rels_to ON rels("to");
+CREATE INDEX idx_rels_ns ON rels(ns);
 CREATE TABLE actions (
-  id            BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-  ns            BIGINT NOT NULL REFERENCES ns(id),
+  seq           BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  id            TEXT NOT NULL,
+  ns            TEXT NOT NULL,
   kind          TEXT NOT NULL,
   name          TEXT NOT NULL,
   status        TEXT NOT NULL DEFAULT 'pending',
-  input         JSON,
-  output        JSON,
-  error         JSON,
+  input         JSONB,
+  output        JSONB,
+  error         JSONB,
 
   -- durable execution state
-  steps         JSON NOT NULL DEFAULT '[]',
+  steps         JSONB NOT NULL DEFAULT '[]',
   cursor        INT NOT NULL DEFAULT 0,
   retries       INT NOT NULL DEFAULT 0,
   cap           INT NOT NULL DEFAULT 3,
@@ -84,8 +69,8 @@ CREATE TABLE actions (
   deadline      TIMESTAMPTZ,
 
   -- context
-  parent        BIGINT REFERENCES actions(id),
-  entity        BIGINT REFERENCES data(id),
+  parent        BIGINT REFERENCES actions(seq),
+  entity        BIGINT REFERENCES data(seq),
   rand          INT NOT NULL,
   created       TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated       TIMESTAMPTZ NOT NULL DEFAULT now()
@@ -95,76 +80,40 @@ CREATE INDEX idx_actions_queue ON actions(status, scheduled)
   WHERE status IN ('pending', 'running');
 CREATE INDEX idx_actions_entity ON actions(entity);
 CREATE INDEX idx_actions_ns ON actions(ns);
-CREATE TABLE rels (
-  id            BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-  ns            BIGINT NOT NULL REFERENCES ns(id),
-  "from"        BIGINT NOT NULL REFERENCES data(id) ON DELETE CASCADE,
-  "to"          BIGINT NOT NULL REFERENCES data(id) ON DELETE CASCADE,
-  path          TEXT NOT NULL,
-  sort          INT NOT NULL DEFAULT 0,
-  meta          JSON,
-
-  UNIQUE("from", path, "to")
-);
-
-CREATE INDEX idx_rels_from ON rels("from", path);
-CREATE INDEX idx_rels_to ON rels("to");
-CREATE INDEX idx_rels_ns ON rels(ns);
-CREATE TABLE log (
-  id            BIGINT GENERATED ALWAYS AS IDENTITY,
-  ns            BIGINT NOT NULL,
+-- Non-mutation events (page views, analytics, webhooks).
+-- Mutation events are captured by CDC on the data table.
+-- CDC'd to ClickHouse and pruned aggressively.
+CREATE TABLE events (
+  seq           BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  ns            TEXT NOT NULL,
   kind          TEXT NOT NULL,
   entity        BIGINT,
-  collection    TEXT,
+  type          TEXT,
   actor         BIGINT,
-  doc           JSONB,
-  diff          JSONB,
+  data          JSONB,
   meta          JSONB,
-  commit        TEXT,
-  rand          INT NOT NULL,
-  created       TIMESTAMPTZ NOT NULL DEFAULT now(),
-  PRIMARY KEY (id, created)
-) PARTITION BY RANGE (created);
-
--- Create default partition to catch all data
-CREATE TABLE log_default PARTITION OF log DEFAULT;
-
--- Create current month partition
-CREATE TABLE log_current PARTITION OF log
-  FOR VALUES FROM (date_trunc('month', now())) TO (date_trunc('month', now()) + interval '1 month');
-
-CREATE INDEX idx_log_ns ON log(ns);
-CREATE INDEX idx_log_entity ON log(entity);
-CREATE INDEX idx_log_kind ON log(kind);
-CREATE TABLE pending (
-  id            BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-  ns            BIGINT NOT NULL,
-  entity        BIGINT NOT NULL,
-  collection    TEXT NOT NULL,
-  title         TEXT,
-  body          TEXT,
-  tags          TEXT[],
-  locale        TEXT,
-  status        TEXT NOT NULL DEFAULT 'pending',
   created       TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
-CREATE INDEX idx_pending_status ON pending(status) WHERE status = 'pending';
+CREATE INDEX idx_events_ns_kind ON events(ns, kind);
+CREATE INDEX idx_events_created ON events(created);
+-- Search index transit table.
+-- Written by the indexing worker, CDC'd to ClickHouse.
 CREATE TABLE search (
-  id            BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-  ns            BIGINT NOT NULL,
+  seq           BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  ns            TEXT NOT NULL,
   entity        BIGINT NOT NULL,
-  collection    TEXT NOT NULL,
+  type          TEXT NOT NULL,
   version       BIGINT NOT NULL,
-  title         TEXT,
+  name          TEXT,
   body          TEXT,
   tags          TEXT[],
   locale        TEXT,
-  meta          JSON,
+  meta          JSONB,
   embedding     vector(3072),
   created       TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated       TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
-CREATE INDEX idx_search_ns_collection ON search (ns, collection);
+CREATE INDEX idx_search_ns_type ON search (ns, type);
 CREATE INDEX idx_search_entity ON search (ns, entity);

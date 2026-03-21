@@ -365,10 +365,10 @@ describe('Issues + Projects', () => {
 })
 
 // ============================================================
-// BEAD ipk: Cost events collection with log emission
+// BEAD ipk: Cost events collection
 // ============================================================
-describe('Cost events with log emission', () => {
-  it('creating a cost event also emits a log entry', async () => {
+describe('Cost events', () => {
+  it('creating a cost event stores in data table', async () => {
     const agent = await adapter.create({ ns: nsId, collection: 'agents', data: { name: 'Cost Agent', slug: 'cost' } })
     const agentId = fromSqid(agent.id).id
 
@@ -384,16 +384,10 @@ describe('Cost events with log emission', () => {
     })
     expect(cost.id).toMatch(/^cst_/)
 
-    // Verify a log entry was created for the cost event
-    const logs = await query<{ kind: string }>(
-      pool,
-      `SELECT kind FROM log WHERE ns = $1 ORDER BY created`,
-      [nsId],
-    )
-
-    // Should have: data.created for agent, data.created for cost-event
-    const kinds = logs.rows.map(r => r.kind)
-    expect(kinds).toContain('data.created')
+    // Verify cost event was created in data table
+    const found = await adapter.findOne({ ns: nsId, collection: 'cost-events', id: cost.id })
+    expect(found).not.toBeNull()
+    expect(found!.amount).toBe(150)
   })
 
   it('cost events can be aggregated by agent', async () => {

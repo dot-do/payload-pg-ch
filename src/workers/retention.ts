@@ -3,25 +3,14 @@ import { query } from '../db/pg.js'
 
 export interface RetentionConfig {
   logRetentionDays?: number
-  pendingRetentionDays?: number
   searchRetentionDays?: number
 }
 
 export async function runRetention(
   pool: PgPool,
   config: RetentionConfig = {},
-): Promise<{ prunedPending: number; prunedSearch: number }> {
-  const pendingDays = config.pendingRetentionDays ?? 7
+): Promise<{ prunedSearch: number }> {
   const searchDays = config.searchRetentionDays ?? 7
-
-  // Prune completed pending rows
-  const pendingResult = await query(
-    pool,
-    `DELETE FROM pending
-     WHERE status = 'done' AND created < now() - $1::interval
-     RETURNING id`,
-    [`${pendingDays} days`],
-  )
 
   // Prune old search transit rows (authoritative copy in ClickHouse)
   const searchResult = await query(
@@ -33,7 +22,6 @@ export async function runRetention(
   )
 
   return {
-    prunedPending: pendingResult.rowCount ?? 0,
     prunedSearch: searchResult.rowCount ?? 0,
   }
 }

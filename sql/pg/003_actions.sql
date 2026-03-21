@@ -1,15 +1,16 @@
 CREATE TABLE actions (
-  id            BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-  ns            BIGINT NOT NULL REFERENCES ns(id),
+  seq           BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  id            TEXT NOT NULL,
+  ns            TEXT NOT NULL,
   kind          TEXT NOT NULL,
   name          TEXT NOT NULL,
   status        TEXT NOT NULL DEFAULT 'pending',
-  input         JSON,
-  output        JSON,
-  error         JSON,
+  input         JSONB,
+  output        JSONB,
+  error         JSONB,
 
   -- durable execution state
-  steps         JSON NOT NULL DEFAULT '[]',
+  steps         JSONB NOT NULL DEFAULT '[]',
   cursor        INT NOT NULL DEFAULT 0,
   retries       INT NOT NULL DEFAULT 0,
   cap           INT NOT NULL DEFAULT 3,
@@ -21,8 +22,8 @@ CREATE TABLE actions (
   deadline      TIMESTAMPTZ,
 
   -- context
-  parent        BIGINT REFERENCES actions(id),
-  entity        BIGINT REFERENCES data(id),
+  parent        BIGINT REFERENCES actions(seq),
+  entity        BIGINT REFERENCES data(seq),
   rand          INT NOT NULL,
   created       TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated       TIMESTAMPTZ NOT NULL DEFAULT now()

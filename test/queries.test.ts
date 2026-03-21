@@ -3,8 +3,7 @@ import { getTestPool, setupTestSchema, cleanupTestData, teardownTestPool } from 
 import { transaction, query } from '../src/db/pg.js'
 import { insertData, updateData, deleteData, findData, findOneData } from '../src/db/queries/data.js'
 import { insertRel, deleteRelsForEntity, findRelsFrom, findRelsTo, extractRels } from '../src/db/queries/rels.js'
-import { insertLog, emit } from '../src/db/queries/log.js'
-import { insertPending, dequeuePending, completePending, failPending } from '../src/db/queries/pending.js'
+import { emit } from '../src/db/queries/events.js'
 import { enqueueAction, dequeueActions, checkpointAction, completeAction, failAction, findAction } from '../src/db/queries/actions.js'
 import type pg from 'pg'
 import type { FieldSchema } from '../src/types.js'
@@ -263,74 +262,20 @@ describe('extractRels', () => {
   })
 })
 
-describe('log queries', () => {
-  it('insertLog stores full snapshot', async () => {
-    const log = await transaction(pool, tx =>
-      insertLog(tx, {
-        ns: nsId,
-        kind: 'data.created',
-        entity: 1,
-        collection: 'posts',
-        actor: 2,
-        doc: { title: 'Test' },
-        diff: null,
-        meta: { ip: '1.2.3.4' },
-        rand: 999,
-      }),
-    )
-
-    expect(log.id).toBeGreaterThan(0)
-    expect(log.kind).toBe('data.created')
-    const doc = log.doc as Record<string, unknown>
-    expect(doc.title).toBe('Test')
-  })
-
-  it('emit writes standalone log entry', async () => {
-    await emit(pool, {
+describe('event queries', () => {
+  it('emit writes event entry', async () => {
+    const event = await emit(pool, {
       ns: nsId,
       kind: 'custom.event',
       meta: { key: 'value' },
     })
 
-    const logs = await query<{ kind: string }>(pool, `SELECT kind FROM log WHERE ns = $1`, [nsId])
-    expect(logs.rows).toHaveLength(1)
-    expect(logs.rows[0].kind).toBe('custom.event')
-  })
-})
+    expect(event.id).toBeGreaterThan(0)
+    expect(event.kind).toBe('custom.event')
 
-describe('pending queries', () => {
-  it('dequeuePending with SKIP LOCKED', async () => {
-    await transaction(pool, async (tx) => {
-      await insertPending(tx, { ns: nsId, entity: 1, collection: 'posts', title: 'A' })
-      await insertPending(tx, { ns: nsId, entity: 2, collection: 'posts', title: 'B' })
-    })
-
-    const batch = await transaction(pool, tx => dequeuePending(tx, 2))
-    expect(batch).toHaveLength(2)
-    expect(batch[0].status).toBe('processing')
-    expect(batch[1].status).toBe('processing')
-  })
-
-  it('completePending and failPending', async () => {
-    const row = await transaction(pool, tx =>
-      insertPending(tx, { ns: nsId, entity: 1, collection: 'posts' }),
-    )
-
-    await completePending(pool, row.id)
-
-    const result = await query<{ status: string }>(pool, `SELECT status FROM pending WHERE id = $1`, [row.id])
-    expect(result.rows[0].status).toBe('done')
-  })
-
-  it('failPending sets status to failed', async () => {
-    const row = await transaction(pool, tx =>
-      insertPending(tx, { ns: nsId, entity: 1, collection: 'posts' }),
-    )
-
-    await failPending(pool, row.id)
-
-    const result = await query<{ status: string }>(pool, `SELECT status FROM pending WHERE id = $1`, [row.id])
-    expect(result.rows[0].status).toBe('failed')
+    const events = await query<{ kind: string }>(pool, `SELECT kind FROM events WHERE ns = $1`, [nsId])
+    expect(events.rows).toHaveLength(1)
+    expect(events.rows[0].kind).toBe('custom.event')
   })
 })
 

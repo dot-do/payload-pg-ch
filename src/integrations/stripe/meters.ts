@@ -22,7 +22,7 @@ export async function reportUsage(
   // Count events by kind
   const counts = await query<{ kind: string; total: string }>(
     pool,
-    `SELECT kind, count(*) AS total FROM log
+    `SELECT kind, count(*) AS total FROM events
      WHERE ns = $1 AND created >= $2
      GROUP BY kind`,
     [nsId, since],

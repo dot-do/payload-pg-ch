@@ -1,6 +1,6 @@
 import type { PgPool } from '../db/pg.js'
 import { cleanupExpiredPreviews } from '../ns/branch.js'
-import { emit } from '../db/queries/log.js'
+import { emit } from '../db/queries/events.js'
 
 export async function runPreviewCleanup(pool: PgPool): Promise<number> {
   const cleaned = await cleanupExpiredPreviews(pool)

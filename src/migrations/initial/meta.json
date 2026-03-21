@@ -2,6 +2,6 @@
   "name": "initial",
   "created": "2026-03-19T00:00:00Z",
   "requires_resync": false,
-  "affects": ["pg.ns", "pg.data", "pg.actions", "pg.rels", "pg.log", "pg.pending", "pg.search", "ch.cdc", "ch.events", "ch.versions", "ch.search"],
+  "affects": ["pg.ns", "pg.data", "pg.actions", "pg.rels", "pg.log", "pg.search", "ch.cdc", "ch.events", "ch.versions", "ch.search"],
   "notes": "Initial schema creation for all PG and CH tables"
 }

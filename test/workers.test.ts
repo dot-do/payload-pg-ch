@@ -2,7 +2,6 @@ import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest'
 import { getTestPool, setupTestSchema, cleanupTestData, teardownTestPool } from './setup.js'
 import { query, transaction } from '../src/db/pg.js'
 import { insertData } from '../src/db/queries/data.js'
-import { insertPending, dequeuePending, completePending } from '../src/db/queries/pending.js'
 import { insertSearch, searchByEmbedding } from '../src/db/queries/search.js'
 import { runRetention } from '../src/workers/retention.js'
 import type pg from 'pg'
@@ -29,33 +28,6 @@ beforeEach(async () => {
 })
 
 describe('retention worker', () => {
-  it('prunes completed pending rows older than retention', async () => {
-    // Insert a "done" pending row with old timestamp
-    await query(pool,
-      `INSERT INTO pending (ns, entity, collection, status, created)
-       VALUES ($1, 1, 'posts', 'done', now() - interval '30 days')`,
-      [nsId],
-    )
-    // Insert a fresh "done" pending row
-    await query(pool,
-      `INSERT INTO pending (ns, entity, collection, status)
-       VALUES ($1, 2, 'posts', 'done')`,
-      [nsId],
-    )
-    // Insert a still-pending row (should not be pruned)
-    await query(pool,
-      `INSERT INTO pending (ns, entity, collection, status, created)
-       VALUES ($1, 3, 'posts', 'pending', now() - interval '30 days')`,
-      [nsId],
-    )
-
-    const result = await runRetention(pool, { pendingRetentionDays: 7 })
-    expect(result.prunedPending).toBe(1) // Only the old "done" row
-
-    const remaining = await query(pool, `SELECT status FROM pending WHERE ns = $1 ORDER BY entity`, [nsId])
-    expect(remaining.rows).toHaveLength(2)
-  })
-
   it('prunes old search transit rows', async () => {
     await transaction(pool, async (tx) => {
       await insertSearch(tx, {
@@ -159,28 +131,24 @@ describe('vector search on data table', () => {
   })
 })
 
-describe('pending → search pipeline simulation', () => {
+describe('data → search indexing pipeline simulation', () => {
   it('simulates the indexer workflow end-to-end', async () => {
-    // 1. Create data + pending rows (like adapter.create does)
+    // 1. Create data row (embedding starts as NULL)
     const dataRow = await transaction(pool, async (tx) => {
-      const row = await insertData(tx, {
+      return insertData(tx, {
         ns: nsId, collection: 'posts',
         doc: { title: 'Searchable Post', body: 'Deep content about AI' },
         rand: 42,
       })
-      await insertPending(tx, {
-        ns: nsId, entity: row.id, collection: 'posts',
-        title: 'Searchable Post', body: 'Deep content about AI',
-        tags: ['ai', 'ml'],
-      })
-      return row
     })
 
-    // 2. Dequeue pending (like indexer does)
-    const pending = await transaction(pool, tx => dequeuePending(tx, 1))
-    expect(pending).toHaveLength(1)
-    expect(pending[0].entity).toBe(dataRow.id)
-    expect(pending[0].status).toBe('processing')
+    // 2. Poll for unindexed rows (like indexer does)
+    const unindexed = await query<{ id: number; collection: string }>(
+      pool,
+      `SELECT id, collection FROM data WHERE embedding IS NULL LIMIT 1`,
+    )
+    expect(unindexed.rows).toHaveLength(1)
+    expect(unindexed.rows[0].id).toBe(dataRow.id)
 
     // 3. "Compute embedding" (mock - just a unit vector)
     const embedding = new Array(768).fill(0)
@@ -205,9 +173,6 @@ describe('pending → search pipeline simulation', () => {
       })
     })
 
-    // 6. Complete pending
-    await completePending(pool, pending[0].id)
-
     // Verify: data has embedding
     const data = await query<{ embedding: string }>(
       pool,
@@ -226,12 +191,8 @@ describe('pending → search pipeline simulation', () => {
     expect(search.rows[0].title).toBe('Searchable Post')
     expect(search.rows[0].tags).toContain('ai')
 
-    // Verify: pending is done
-    const pendingStatus = await query<{ status: string }>(
-      pool,
-      `SELECT status FROM pending WHERE id = $1`,
-      [pending[0].id],
-    )
-    expect(pendingStatus.rows[0].status).toBe('done')
+    // Verify: no more unindexed rows
+    const remaining = await query(pool, `SELECT id FROM data WHERE embedding IS NULL AND ns = $1`, [nsId])
+    expect(remaining.rows).toHaveLength(0)
   })
 })

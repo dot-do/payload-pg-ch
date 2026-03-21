@@ -23,8 +23,7 @@ export async function setupTestSchema(): Promise<void> {
   // Drop and recreate all tables
   await p.query(`
     DROP TABLE IF EXISTS search CASCADE;
-    DROP TABLE IF EXISTS pending CASCADE;
-    DROP TABLE IF EXISTS log CASCADE;
+    DROP TABLE IF EXISTS events CASCADE;
     DROP TABLE IF EXISTS rels CASCADE;
     DROP TABLE IF EXISTS actions CASCADE;
     DROP TABLE IF EXISTS data CASCADE;
@@ -39,9 +38,8 @@ export async function setupTestSchema(): Promise<void> {
     '002_data.sql',
     '003_actions.sql',
     '004_rels.sql',
-    '005_log.sql',
-    '006_pending.sql',
-    '007_search.sql',
+    '005_events.sql',
+    '006_search.sql',
   ]
 
   for (const file of files) {
@@ -55,8 +53,7 @@ export async function setupTestSchema(): Promise<void> {
 export async function cleanupTestData(): Promise<void> {
   const p = getTestPool()
   await p.query(`DELETE FROM rels`)
-  await p.query(`DELETE FROM pending`)
-  await p.query(`DELETE FROM log`)
+  await p.query(`DELETE FROM events`)
   await p.query(`DELETE FROM actions`)
   await p.query(`DELETE FROM data`)
   await p.query(`DELETE FROM ns`)

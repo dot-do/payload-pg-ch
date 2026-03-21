@@ -33,8 +33,10 @@ export interface DataRow {
   collection: string
   slug: string | null
   doc: unknown
+  meta: unknown
   status: string | null
   locale: string | null
+  version: number
   rand: number
   created: Date
   updated: Date
@@ -51,18 +53,15 @@ export interface RelRow {
   meta: unknown
 }
 
-export interface LogRow {
+export interface EventRow {
   id: number
   ns: number
   kind: string
   entity: number | null
   collection: string | null
   actor: number | null
-  doc: unknown
-  diff: unknown
+  data: unknown
   meta: unknown
-  commit: string | null
-  rand: number
   created: Date
 }
 
@@ -88,19 +87,6 @@ export interface ActionRow {
   rand: number
   created: Date
   updated: Date
-}
-
-export interface PendingRow {
-  id: number
-  ns: number
-  entity: number
-  collection: string
-  title: string | null
-  body: string | null
-  tags: string[]
-  locale: string | null
-  status: string
-  created: Date
 }
 
 export interface SearchRow {

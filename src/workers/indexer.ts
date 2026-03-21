@@ -1,12 +1,18 @@
 import type { PgPool } from '../db/pg.js'
 import { transaction, query } from '../db/pg.js'
-import { dequeuePending, completePending, failPending } from '../db/queries/pending.js'
 import { insertSearch } from '../db/queries/search.js'
 
 export interface IndexerConfig {
   geminiApiKey: string
   batchSize?: number
   pollIntervalMs?: number
+}
+
+interface UnindexedRow {
+  id: number
+  ns: number
+  collection: string
+  doc: unknown
 }
 
 export async function runIndexerOnce(
@@ -17,14 +23,27 @@ export async function runIndexerOnce(
   let processed = 0
 
   const rows = await transaction(pool, async (tx) => {
-    return dequeuePending(tx, batchSize)
+    const result = await query<UnindexedRow>(
+      tx,
+      `SELECT id, ns, collection, doc FROM data WHERE embedding IS NULL LIMIT $1 FOR UPDATE SKIP LOCKED`,
+      [batchSize],
+    )
+    return result.rows
   })
 
   for (const row of rows) {
     try {
-      const text = [row.title, row.body].filter(Boolean).join('\n')
+      const doc = typeof row.doc === 'string' ? JSON.parse(row.doc) : row.doc as Record<string, unknown>
+      const title = (doc.title as string) ?? null
+      const body = (doc.body as string) ?? null
+      const text = [title, body].filter(Boolean).join('\n')
       if (!text) {
-        await completePending(pool, row.id)
+        // No text to embed — write a zero vector so we skip it next poll
+        const zeroes = new Array(768).fill(0)
+        await query(pool, `UPDATE data SET embedding = $1 WHERE id = $2`, [
+          `[${zeroes.join(',')}]`,
+          row.id,
+        ])
         continue
       }
 
@@ -37,37 +56,26 @@ export async function runIndexerOnce(
       // Update data.embedding with 768d
       await query(pool, `UPDATE data SET embedding = $1 WHERE id = $2`, [
         `[${embedding768.join(',')}]`,
-        row.entity,
+        row.id,
       ])
-
-      // Get version for search table
-      const versionResult = await query<{ id: number }>(
-        pool,
-        `SELECT id FROM data WHERE id = $1`,
-        [row.entity],
-      )
-      const version = versionResult.rows[0]?.id ?? 0
 
       // Write to search transit table (CDC streams to ClickHouse)
       await transaction(pool, async (tx) => {
         await insertSearch(tx, {
           ns: row.ns,
-          entity: row.entity,
+          entity: row.id,
           collection: row.collection,
-          version,
-          title: row.title,
-          body: row.body,
-          tags: row.tags,
-          locale: row.locale,
+          version: row.id,
+          title,
+          body,
+          tags: [],
           embedding: embedding3072,
         })
       })
 
-      await completePending(pool, row.id)
       processed++
     } catch (err) {
-      console.error(`Indexer failed for pending ${row.id}:`, err)
-      await failPending(pool, row.id)
+      console.error(`Indexer failed for data row ${row.id}:`, err)
     }
   }
 

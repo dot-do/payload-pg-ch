@@ -8,14 +8,13 @@ export { createBranch, mergeBranch, cleanupBranch, cleanupExpiredPreviews } from
 // Query modules
 export * as dataQueries from './db/queries/data.js'
 export * as relQueries from './db/queries/rels.js'
-export * as logQueries from './db/queries/log.js'
+export * as eventQueries from './db/queries/events.js'
 export * as actionQueries from './db/queries/actions.js'
-export * as pendingQueries from './db/queries/pending.js'
 export * as searchQueries from './db/queries/search.js'
 
 // Types
 export type {
-  Sqid, NsRow, DataRow, RelRow, LogRow, ActionRow, PendingRow, SearchRow,
+  Sqid, NsRow, DataRow, RelRow, EventRow, ActionRow, SearchRow,
   Where, WhereField, RequestMeta, CollectionTier, CollectionSchema, FieldSchema,
   AdapterConfig,
 } from './types.js'

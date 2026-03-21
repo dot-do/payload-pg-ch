@@ -1,6 +1,6 @@
 import type { PgPool } from '../../db/pg.js'
 import { query } from '../../db/pg.js'
-import { emit } from '../../db/queries/log.js'
+import { emit } from '../../db/queries/events.js'
 
 export interface StripeWebhookConfig {
   webhookSecret: string

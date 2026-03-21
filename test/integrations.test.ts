@@ -29,7 +29,7 @@ beforeEach(async () => {
 })
 
 describe('Stripe webhook handler', () => {
-  it('logs stripe events to log table', async () => {
+  it('logs stripe events to events table', async () => {
     await handleStripeWebhook(pool, {
       id: 'evt_test_1',
       type: 'invoice.paid',
@@ -41,14 +41,14 @@ describe('Stripe webhook handler', () => {
       },
     })
 
-    const logs = await query<{ kind: string; meta: Record<string, unknown> }>(
+    const events = await query<{ kind: string; meta: Record<string, unknown> }>(
       pool,
-      `SELECT kind, meta FROM log WHERE ns = $1`,
+      `SELECT kind, meta FROM events WHERE ns = $1`,
       [nsId],
     )
-    expect(logs.rows).toHaveLength(1)
-    expect(logs.rows[0].kind).toBe('stripe.invoice.paid')
-    expect(logs.rows[0].meta.amount).toBe(2999)
+    expect(events.rows).toHaveLength(1)
+    expect(events.rows[0].kind).toBe('stripe.invoice.paid')
+    expect(events.rows[0].meta.amount).toBe(2999)
   })
 
   it('updates plan on subscription.updated', async () => {
@@ -110,8 +110,8 @@ describe('Stripe webhook handler', () => {
       },
     })
 
-    const logs = await query(pool, `SELECT id FROM log WHERE ns = $1`, [nsId])
-    expect(logs.rows).toHaveLength(0)
+    const events = await query(pool, `SELECT id FROM events WHERE ns = $1`, [nsId])
+    expect(events.rows).toHaveLength(0)
   })
 })
 
@@ -138,13 +138,13 @@ describe('GitHub webhook handler - pull_request', () => {
     expect(preview.rows[0].pr).toBe(42)
     expect(preview.rows[0].parent).toBe(nsId)
 
-    // Should also emit a log event
-    const logs = await query<{ kind: string }>(
+    // Should also emit an event
+    const events = await query<{ kind: string }>(
       pool,
-      `SELECT kind FROM log WHERE ns = $1 AND kind = 'preview.created'`,
+      `SELECT kind FROM events WHERE ns = $1 AND kind = 'preview.created'`,
       [nsId],
     )
-    expect(logs.rows).toHaveLength(1)
+    expect(events.rows).toHaveLength(1)
   })
 
   it('does not create duplicate preview on reopened', async () => {
@@ -189,12 +189,12 @@ describe('GitHub webhook handler - pull_request', () => {
     expect(previews.rows).toHaveLength(0)
 
     // Should emit cleanup event
-    const logs = await query<{ kind: string }>(
+    const events = await query<{ kind: string }>(
       pool,
-      `SELECT kind FROM log WHERE ns = $1 AND kind = 'preview.cleaned'`,
+      `SELECT kind FROM events WHERE ns = $1 AND kind = 'preview.cleaned'`,
       [nsId],
     )
-    expect(logs.rows).toHaveLength(1)
+    expect(events.rows).toHaveLength(1)
   })
 
   it('ignores PRs for untracked repos', async () => {
@@ -218,14 +218,14 @@ describe('GitHub webhook handler - push', () => {
       repository: { full_name: 'org/repo' },
     })
 
-    const logs = await query<{ kind: string; meta: Record<string, unknown> }>(
+    const events = await query<{ kind: string; meta: Record<string, unknown> }>(
       pool,
-      `SELECT kind, meta FROM log WHERE ns = $1 AND kind = 'github.push'`,
+      `SELECT kind, meta FROM events WHERE ns = $1 AND kind = 'github.push'`,
       [nsId],
     )
-    expect(logs.rows).toHaveLength(1)
-    expect(logs.rows[0].meta.commit).toBe('abc123def456')
-    expect(logs.rows[0].meta.branch).toBe('main')
+    expect(events.rows).toHaveLength(1)
+    expect(events.rows[0].meta.commit).toBe('abc123def456')
+    expect(events.rows[0].meta.branch).toBe('main')
   })
 
   it('ignores pushes to untracked branches', async () => {
@@ -235,8 +235,8 @@ describe('GitHub webhook handler - push', () => {
       repository: { full_name: 'org/repo' },
     })
 
-    const logs = await query(pool, `SELECT id FROM log WHERE ns = $1 AND kind = 'github.push'`, [nsId])
-    expect(logs.rows).toHaveLength(0)
+    const events = await query(pool, `SELECT id FROM events WHERE ns = $1 AND kind = 'github.push'`, [nsId])
+    expect(events.rows).toHaveLength(0)
   })
 
   it('ignores pushes to untracked repos', async () => {
@@ -246,7 +246,7 @@ describe('GitHub webhook handler - push', () => {
       repository: { full_name: 'other/repo' },
     })
 
-    const logs = await query(pool, `SELECT id FROM log WHERE kind = 'github.push'`)
-    expect(logs.rows).toHaveLength(0)
+    const events = await query(pool, `SELECT id FROM events WHERE kind = 'github.push'`)
+    expect(events.rows).toHaveLength(0)
   })
 })

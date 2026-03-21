@@ -43,7 +43,7 @@ beforeEach(async () => {
 })
 
 describe('transaction atomicity', () => {
-  it('create is atomic: data + rels + log + pending all succeed or all fail', async () => {
+  it('create is atomic: data + rels all succeed or all fail', async () => {
     const user = await adapter.create({ ns: nsId, collection: 'users', data: { name: 'Author' } })
     const userId = fromSqid(user.id).id
 
@@ -57,19 +57,15 @@ describe('transaction atomicity', () => {
 
     const postId = fromSqid(post.id).id
 
-    // All four tables should have entries
+    // Data and rels should have entries
     const data = await query(pool, `SELECT id FROM data WHERE id = $1`, [postId])
     const rels = await query(pool, `SELECT id FROM rels WHERE "from" = $1`, [postId])
-    const log = await query(pool, `SELECT id FROM log WHERE entity = $1 AND kind = 'data.created'`, [postId])
-    const pending = await query(pool, `SELECT id FROM pending WHERE entity = $1`, [postId])
 
     expect(data.rows).toHaveLength(1)
     expect(rels.rows).toHaveLength(1)
-    expect(log.rows).toHaveLength(1)
-    expect(pending.rows).toHaveLength(1)
   })
 
-  it('update is atomic: data + rels + log + pending', async () => {
+  it('update is atomic: data + rels', async () => {
     const user1 = await adapter.create({ ns: nsId, collection: 'users', data: { name: 'Author1' } })
     const user2 = await adapter.create({ ns: nsId, collection: 'users', data: { name: 'Author2' } })
     const user1Id = fromSqid(user1.id).id
@@ -94,19 +90,9 @@ describe('transaction atomicity', () => {
     const rels = await query<{ to: number }>(pool, `SELECT "to" FROM rels WHERE "from" = $1`, [postId])
     expect(rels.rows).toHaveLength(1)
     expect(rels.rows[0].to).toBe(user2Id)
-
-    // Should have 2 log entries
-    const logs = await query<{ kind: string }>(pool, `SELECT kind FROM log WHERE entity = $1 ORDER BY created`, [postId])
-    expect(logs.rows).toHaveLength(2)
-    expect(logs.rows[0].kind).toBe('data.created')
-    expect(logs.rows[1].kind).toBe('data.updated')
-
-    // Should have 2 pending entries
-    const pending = await query(pool, `SELECT id FROM pending WHERE entity = $1`, [postId])
-    expect(pending.rows).toHaveLength(2)
   })
 
-  it('delete is atomic: data removal + log entry', async () => {
+  it('delete is atomic: data removal', async () => {
     const post = await adapter.create({
       ns: nsId,
       collection: 'posts',
@@ -123,11 +109,6 @@ describe('transaction atomicity', () => {
     // Data should be gone
     const data = await query(pool, `SELECT id FROM data WHERE id = $1`, [postId])
     expect(data.rows).toHaveLength(0)
-
-    // Log should have both create and delete entries
-    const logs = await query<{ kind: string }>(pool, `SELECT kind FROM log WHERE entity = $1 ORDER BY created`, [postId])
-    expect(logs.rows).toHaveLength(2)
-    expect(logs.rows[1].kind).toBe('data.deleted')
   })
 
   it('failed transaction rolls back completely', async () => {
@@ -152,67 +133,6 @@ describe('transaction atomicity', () => {
   })
 })
 
-describe('log entry fidelity', () => {
-  it('log captures full document snapshot on create', async () => {
-    const doc = { title: 'Snapshot Test', body: 'Full content', nested: { key: 'value' } }
-    const post = await adapter.create({ ns: nsId, collection: 'posts', data: doc })
-    const postId = fromSqid(post.id).id
-
-    const log = await query<{ doc: Record<string, unknown> }>(
-      pool,
-      `SELECT doc FROM log WHERE entity = $1 AND kind = 'data.created'`,
-      [postId],
-    )
-
-    expect(log.rows[0].doc.title).toBe('Snapshot Test')
-    expect(log.rows[0].doc.body).toBe('Full content')
-    const nested = log.rows[0].doc.nested as Record<string, unknown>
-    expect(nested.key).toBe('value')
-  })
-
-  it('log captures diff on update', async () => {
-    const post = await adapter.create({
-      ns: nsId,
-      collection: 'posts',
-      data: { title: 'V1', body: 'Original' },
-    })
-
-    await adapter.updateOne({
-      ns: nsId,
-      collection: 'posts',
-      id: post.id,
-      data: { title: 'V2' },
-    })
-
-    const postId = fromSqid(post.id).id
-    const log = await query<{ doc: Record<string, unknown>; diff: Record<string, unknown> }>(
-      pool,
-      `SELECT doc, diff FROM log WHERE entity = $1 AND kind = 'data.updated'`,
-      [postId],
-    )
-
-    // Doc should be the merged result
-    expect(log.rows[0].doc.title).toBe('V2')
-    expect(log.rows[0].doc.body).toBe('Original')
-
-    // Diff should be just what changed
-    expect(log.rows[0].diff.title).toBe('V2')
-  })
-
-  it('log entries have correct rand for sqid reconstruction', async () => {
-    const post = await adapter.create({
-      ns: nsId,
-      collection: 'posts',
-      data: { title: 'Rand Test' },
-    })
-    const postId = fromSqid(post.id).id
-
-    const dataRow = await query<{ rand: number }>(pool, `SELECT rand FROM data WHERE id = $1`, [postId])
-    const logRow = await query<{ rand: number }>(pool, `SELECT rand FROM log WHERE entity = $1 LIMIT 1`, [postId])
-
-    expect(logRow.rows[0].rand).toBe(dataRow.rows[0].rand)
-  })
-})
 
 describe('action queue safety', () => {
   it('all enqueued actions are dequeued exactly once', async () => {
@@ -291,13 +211,13 @@ describe('emit variations', () => {
       meta: { path: '/blog/hello', referrer: 'google.com', duration: 4500 },
     })
 
-    const log = await query<{ kind: string; meta: Record<string, unknown> }>(
+    const events = await query<{ kind: string; meta: Record<string, unknown> }>(
       pool,
-      `SELECT kind, meta FROM log WHERE ns = $1 AND kind = 'page.viewed'`,
+      `SELECT kind, meta FROM events WHERE ns = $1 AND kind = 'page.viewed'`,
       [nsId],
     )
-    expect(log.rows).toHaveLength(1)
-    expect(log.rows[0].meta.duration).toBe(4500)
+    expect(events.rows).toHaveLength(1)
+    expect(events.rows[0].meta.duration).toBe(4500)
   })
 
   it('emit multiple event kinds', async () => {
@@ -305,11 +225,11 @@ describe('emit variations', () => {
     await adapter.emit({ ns: nsId, kind: 'search.query', meta: { query: 'test', results: 5 } })
     await adapter.emit({ ns: nsId, kind: 'ai.generated', entity: 1, actor: 1, meta: { tokens: 500 } })
 
-    const logs = await query<{ kind: string }>(
+    const events = await query<{ kind: string }>(
       pool,
-      `SELECT kind FROM log WHERE ns = $1 ORDER BY created`,
+      `SELECT kind FROM events WHERE ns = $1 ORDER BY created`,
       [nsId],
     )
-    expect(logs.rows.map(r => r.kind)).toEqual(['auth.login', 'search.query', 'ai.generated'])
+    expect(events.rows.map(r => r.kind)).toEqual(['auth.login', 'search.query', 'ai.generated'])
   })
 })

@@ -1,46 +1,175 @@
-CREATE DATABASE IF NOT EXISTS cdc;
+-- ==========================================================================
+-- versions: CDC landing from PG data table (append-only)
+-- Every INSERT/UPDATE/DELETE in PG data becomes a row here.
+-- PeerDB mirror: pg.data → ch.versions
+-- ==========================================================================
 
--- CDC mirror of pg.log (immutable, append-only)
-CREATE TABLE cdc.log (
-  id                    UInt64,
-  ns                    UInt64,
-  kind                  LowCardinality(String),
-  entity                UInt64,
-  collection            LowCardinality(String),
-  actor                 UInt64,
-  doc                   Nullable(String),
-  diff                  Nullable(String),
-  meta                  Nullable(String),
-  commit                String DEFAULT '',
+CREATE TABLE versions (
+  seq                   UInt64,
+  id                    String,
+  ns                    String,
+  type                  LowCardinality(String),
+  name                  String DEFAULT '',
+  slug                  String DEFAULT '',
+  url                   String DEFAULT '',
+  mdx                   String DEFAULT '',
+  data                  String DEFAULT '{}',
+  code                  String DEFAULT '',
+  meta                  String DEFAULT '{}',
+  status                LowCardinality(String) DEFAULT '',
+  locale                LowCardinality(String) DEFAULT '',
+  version               UInt64,
   rand                  UInt16,
+  created               DateTime64(3),
+  updated               DateTime64(3),
+  embedding             Array(Float32),
+  _peerdb_is_deleted    UInt8 DEFAULT 0,
+  _peerdb_version       UInt64
+) ENGINE = MergeTree()
+ORDER BY (ns, seq, _peerdb_version)
+PARTITION BY toYYYYMM(updated);
+-- ==========================================================================
+-- data: current state, derived from versions via ReplacingMergeTree
+-- ==========================================================================
+
+CREATE TABLE data (
+  seq                   UInt64,
+  id                    String,
+  ns                    String,
+  type                  LowCardinality(String),
+  name                  String DEFAULT '',
+  slug                  String DEFAULT '',
+  url                   String DEFAULT '',
+  mdx                   String DEFAULT '',
+  data                  String DEFAULT '{}',
+  code                  String DEFAULT '',
+  meta                  String DEFAULT '{}',
+  status                LowCardinality(String) DEFAULT '',
+  locale                LowCardinality(String) DEFAULT '',
+  version               UInt64,
+  rand                  UInt16,
+  created               DateTime64(3),
+  updated               DateTime64(3),
+  embedding             Array(Float32),
+  _peerdb_is_deleted    UInt8 DEFAULT 0,
+  _peerdb_version       UInt64
+) ENGINE = ReplacingMergeTree(_peerdb_version)
+ORDER BY (ns, seq);
+
+CREATE MATERIALIZED VIEW mv_versions_to_data TO data AS
+SELECT * FROM versions;
+-- ==========================================================================
+-- events: unified event stream with ULID IDs
+-- Two sources: data mutations (via MV from versions) + non-mutation events (CDC from PG events)
+-- ==========================================================================
+
+CREATE TABLE events (
+  id            String DEFAULT generateULID(),
+  ts            DateTime64(3),
+  kind          LowCardinality(String),
+  entity        UInt64 DEFAULT 0,
+  ns            String,
+  type          LowCardinality(String) DEFAULT '',
+  actor         UInt64 DEFAULT 0,
+  doc           String DEFAULT '',
+  data          String DEFAULT '{}',
+  meta          String DEFAULT '{}',
+  source        LowCardinality(String) DEFAULT 'cdc'
+) ENGINE = MergeTree()
+ORDER BY (ns, kind, ts)
+PARTITION BY toYYYYMM(ts);
+
+-- Data mutations → events
+CREATE MATERIALIZED VIEW mv_versions_to_events TO events AS
+SELECT
+  generateULID()        AS id,
+  updated               AS ts,
+  multiIf(
+    _peerdb_is_deleted = 1, 'data.deleted',
+    version = 1,             'data.created',
+                             'data.updated'
+  )                     AS kind,
+  seq                   AS entity,
+  ns                    AS ns,
+  type                  AS type,
+  0                     AS actor,
+  mdx                   AS doc,
+  data                  AS data,
+  meta                  AS meta,
+  'cdc'                 AS source
+FROM versions;
+
+-- CDC landing for PG events table (non-mutation events)
+CREATE TABLE cdc_events (
+  seq                   UInt64,
+  ns                    String,
+  kind                  LowCardinality(String),
+  entity                UInt64 DEFAULT 0,
+  type                  LowCardinality(String) DEFAULT '',
+  actor                 UInt64 DEFAULT 0,
+  data                  Nullable(String),
+  meta                  Nullable(String),
   created               DateTime64(3),
   _peerdb_is_deleted    UInt8 DEFAULT 0,
   _peerdb_version       UInt64
 ) ENGINE = MergeTree()
-ORDER BY (ns, entity, created)
-PARTITION BY (ns, toYYYYMM(created));
+ORDER BY (ns, kind, created)
+PARTITION BY toYYYYMM(created);
 
--- CDC mirror of pg.data (current state, replacing)
-CREATE TABLE cdc.data (
-  id                    UInt64,
-  ns                    UInt64,
-  collection            LowCardinality(String),
-  slug                  String DEFAULT '',
-  doc                   String,
-  status                LowCardinality(String) DEFAULT '',
+-- Non-mutation events → unified events
+CREATE MATERIALIZED VIEW mv_cdc_events_to_events TO events AS
+SELECT
+  generateULID()            AS id,
+  created                   AS ts,
+  kind, entity, ns, type, actor,
+  ''                        AS doc,
+  coalesce(data, '{}')      AS data,
+  coalesce(meta, '{}')      AS meta,
+  'app'                     AS source
+FROM cdc_events;
+-- ==========================================================================
+-- search: full-text + vector search index (CDC from PG search table)
+-- ==========================================================================
+
+CREATE TABLE search (
+  seq                   UInt64,
+  ns                    String,
+  entity                UInt64,
+  type                  LowCardinality(String),
+  version               UInt64,
+  name                  String DEFAULT '',
+  body                  String DEFAULT '',
+  tags                  Array(String),
   locale                LowCardinality(String) DEFAULT '',
-  rand                  UInt16,
+  meta                  String DEFAULT '{}',
+  embedding             Array(Float32),
   created               DateTime64(3),
   updated               DateTime64(3),
   _peerdb_is_deleted    UInt8 DEFAULT 0,
   _peerdb_version       UInt64
 ) ENGINE = ReplacingMergeTree(_peerdb_version)
-ORDER BY (ns, id);
+ORDER BY (ns, type, entity)
+PARTITION BY toYYYYMM(updated);
 
--- CDC mirror of pg.actions
-CREATE TABLE cdc.actions (
-  id                    UInt64,
-  ns                    UInt64,
+-- CDC mirrors for rels and actions (analytics)
+
+CREATE TABLE rels (
+  seq                   UInt64,
+  ns                    String,
+  `from`                UInt64,
+  `to`                  UInt64,
+  path                  String,
+  sort                  UInt32,
+  meta                  Nullable(String),
+  _peerdb_is_deleted    UInt8 DEFAULT 0,
+  _peerdb_version       UInt64
+) ENGINE = ReplacingMergeTree(_peerdb_version)
+ORDER BY (ns, seq);
+
+CREATE TABLE actions (
+  seq                   UInt64,
+  id                    String,
+  ns                    String,
   kind                  LowCardinality(String),
   name                  String,
   status                LowCardinality(String),
@@ -63,121 +192,4 @@ CREATE TABLE cdc.actions (
   _peerdb_is_deleted    UInt8 DEFAULT 0,
   _peerdb_version       UInt64
 ) ENGINE = ReplacingMergeTree(_peerdb_version)
-ORDER BY (ns, id);
-
--- CDC mirror of pg.rels
-CREATE TABLE cdc.rels (
-  id                    UInt64,
-  ns                    UInt64,
-  `from`                UInt64,
-  `to`                  UInt64,
-  path                  String,
-  sort                  UInt32,
-  meta                  Nullable(String),
-  _peerdb_is_deleted    UInt8 DEFAULT 0,
-  _peerdb_version       UInt64
-) ENGINE = ReplacingMergeTree(_peerdb_version)
-ORDER BY (ns, id);
-
--- CDC mirror of pg.search (transit table)
-CREATE TABLE cdc.search (
-  id                    UInt64,
-  ns                    UInt64,
-  entity                UInt64,
-  collection            LowCardinality(String),
-  version               UInt64,
-  title                 String DEFAULT '',
-  body                  String DEFAULT '',
-  tags                  Array(String),
-  locale                LowCardinality(String) DEFAULT '',
-  meta                  Nullable(String),
-  embedding             Array(Float32),
-  created               DateTime64(3),
-  updated               DateTime64(3),
-  _peerdb_is_deleted    UInt8 DEFAULT 0,
-  _peerdb_version       UInt64
-) ENGINE = ReplacingMergeTree(_peerdb_version)
-ORDER BY (ns, entity);
--- Derived events table (materialized from cdc.log)
-CREATE TABLE events (
-  id            UInt64,
-  ts            DateTime64(3),
-  kind          LowCardinality(String),
-  entity        UInt64,
-  actor         UInt64,
-  ns            UInt64,
-  payload       String DEFAULT '',
-  meta          String DEFAULT '',
-  embedding     Array(Float32)
-) ENGINE = MergeTree()
-ORDER BY (ns, kind, entity, ts)
-PARTITION BY (ns, toYYYYMM(ts));
-
--- Derived versions table (materialized from cdc.log)
-CREATE TABLE versions (
-  id            UInt64,
-  entity        UInt64,
-  ns            UInt64,
-  version       UInt64,
-  doc           String DEFAULT '',
-  diff          String DEFAULT '',
-  author        UInt64,
-  published     UInt8 DEFAULT 0,
-  commit        String DEFAULT '',
-  rand          UInt16,
-  created       DateTime64(3),
-  embedding     Array(Float32)
-) ENGINE = ReplacingMergeTree(version)
-ORDER BY (ns, entity, version)
-PARTITION BY (ns, toYYYYMM(created));
-
--- Derived search table (materialized from cdc.search)
-CREATE TABLE search (
-  id            UInt64,
-  entity        UInt64,
-  ns            UInt64,
-  collection    LowCardinality(String),
-  version       UInt64,
-  title         String DEFAULT '',
-  body          String DEFAULT '',
-  tags          Array(String),
-  locale        LowCardinality(String) DEFAULT '',
-  meta          String DEFAULT '',
-  embedding     Array(Float32),
-  created       DateTime64(3),
-  updated       DateTime64(3)
-) ENGINE = ReplacingMergeTree(version)
-ORDER BY (ns, collection, entity)
-PARTITION BY (ns, toYYYYMM(updated));
--- All log entries become events
-CREATE MATERIALIZED VIEW mv_log_to_events TO events AS
-SELECT
-  generateSnowflakeID()       AS id,
-  created                     AS ts,
-  kind                        AS kind,
-  entity                      AS entity,
-  actor                       AS actor,
-  ns                          AS ns,
-  coalesce(doc, '')           AS payload,
-  coalesce(meta, '')          AS meta,
-  []                          AS embedding
-FROM cdc.log;
-
--- Data mutation log entries become versions
-CREATE MATERIALIZED VIEW mv_log_to_versions TO versions AS
-SELECT
-  generateSnowflakeID()       AS id,
-  entity                      AS entity,
-  ns                          AS ns,
-  id                          AS version,
-  coalesce(doc, '')           AS doc,
-  coalesce(diff, '')          AS diff,
-  actor                       AS author,
-  0                           AS published,
-  coalesce(commit, '')        AS commit,
-  rand                        AS rand,
-  created                     AS created,
-  []                          AS embedding
-FROM cdc.log
-WHERE kind IN ('data.created', 'data.updated')
-  AND doc IS NOT NULL;
+ORDER BY (ns, seq);

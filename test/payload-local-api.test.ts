@@ -381,8 +381,7 @@ function documentDBAdapter(opts: { postgres: string }) {
           // Delete by finding and removing the specific row by its internal ID
           const intId = fromSqid(existing.id).id
           await query(pool, `DELETE FROM rels WHERE "from" = $1 OR "to" = $1`, [intId])
-          await query(pool, `DELETE FROM pending WHERE entity = $1`, [intId])
-          await query(pool, `DELETE FROM log WHERE entity = $1`, [intId])
+          await query(pool, `DELETE FROM events WHERE entity = $1`, [intId])
           await query(pool, `DELETE FROM data WHERE id = $1 AND ns = $2`, [intId, NS_ID])
           return existing as any
         },
@@ -504,8 +503,7 @@ beforeEach(async () => {
   // Clean up test data between tests (but keep the namespace)
   const p = getTestPool()
   await p.query(`DELETE FROM rels`)
-  await p.query(`DELETE FROM pending`)
-  await p.query(`DELETE FROM log`)
+  await p.query(`DELETE FROM events`)
   await p.query(`DELETE FROM actions`)
   await p.query(`DELETE FROM data`)
 })

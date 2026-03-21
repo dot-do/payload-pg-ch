@@ -79,32 +79,6 @@ describe('where: empty IN / NOT IN arrays', () => {
   })
 })
 
-describe('deleteMany creates pending rows for search de-indexing', () => {
-  it('inserts pending row for each deleted entity', async () => {
-    await adapter.create({ ns: nsId, collection: 'posts', data: { title: 'Delete Me 1' } })
-    await adapter.create({ ns: nsId, collection: 'posts', data: { title: 'Delete Me 2' } })
-    await adapter.create({ ns: nsId, collection: 'posts', data: { title: 'Keep Me' } })
-
-    // Clear pending rows from create
-    await query(pool, `DELETE FROM pending WHERE ns = $1`, [nsId])
-
-    await adapter.deleteMany({
-      ns: nsId,
-      collection: 'posts',
-      where: { title: { contains: 'Delete Me' } },
-    })
-
-    const pending = await query<{ entity: number; collection: string }>(
-      pool,
-      `SELECT entity, collection FROM pending WHERE ns = $1`,
-      [nsId],
-    )
-
-    expect(pending.rows).toHaveLength(2)
-    expect(pending.rows.every(r => r.collection === 'posts')).toBe(true)
-  })
-})
-
 describe('deleteMany in branch', () => {
   let branchNsId: number
 

@@ -266,26 +266,4 @@ describe('data integrity across operations', () => {
     expect(final!.tags).toEqual(['a'])
   })
 
-  it('log tracks full history of changes', async () => {
-    const post = await adapter.create({
-      ns: nsId,
-      collection: 'posts',
-      data: { title: 'Track Me' },
-    })
-    const postId = fromSqid(post.id).id
-
-    await adapter.updateOne({ ns: nsId, collection: 'posts', id: post.id, data: { title: 'V2' } })
-    await adapter.updateOne({ ns: nsId, collection: 'posts', id: post.id, data: { title: 'V3' } })
-
-    const logs = await query<{ kind: string; doc: Record<string, unknown> }>(
-      pool,
-      `SELECT kind, doc FROM log WHERE entity = $1 ORDER BY created`,
-      [postId],
-    )
-
-    expect(logs.rows).toHaveLength(3)
-    expect(logs.rows[0].doc.title).toBe('Track Me')
-    expect(logs.rows[1].doc.title).toBe('V2')
-    expect(logs.rows[2].doc.title).toBe('V3')
-  })
 })

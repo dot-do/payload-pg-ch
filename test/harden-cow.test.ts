@@ -223,14 +223,14 @@ describe('update forked doc preserves _parent through merge', () => {
       data: { title: 'Updated Twice', body: 'New body' },
     })
 
-    // Verify the forked doc still has _parent
-    const forkedRows = await query<{ doc: Record<string, unknown> }>(
+    // Verify the forked doc still has _parent in meta column
+    const forkedRows = await query<{ meta: Record<string, unknown> }>(
       pool,
-      `SELECT doc FROM data WHERE ns = $1 AND collection = 'posts'`,
+      `SELECT meta FROM data WHERE ns = $1 AND collection = 'posts'`,
       [branchNsId],
     )
     expect(forkedRows.rows).toHaveLength(1)
-    expect(forkedRows.rows[0].doc._parent).toBe(parentDocId)
+    expect((forkedRows.rows[0].meta as Record<string, unknown>)._parent).toBe(parentDocId)
 
     // Merge should write back to parent
     const result = await adapter.mergeBranch(branchNsId)

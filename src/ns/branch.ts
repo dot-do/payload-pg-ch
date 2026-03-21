@@ -1,7 +1,6 @@
 import type { PgPool } from '../db/pg.js'
 import type { NsRow } from '../types.js'
 import { query, transaction } from '../db/pg.js'
-import { generateRand } from '../id/sqids.js'
 
 export interface CreateBranchArgs {
   parent: number
@@ -54,23 +53,23 @@ export async function mergeBranch(
     if (branch.merged) throw new Error('Branch already merged')
 
     // Get modified docs (excluding tombstones)
-    const docsResult = await query<{ id: number; doc: unknown; collection: string; slug: string | null; status: string | null; locale: string | null; rand: number; created: Date }>(
+    const docsResult = await query<{ id: number; doc: unknown; meta: unknown; collection: string; slug: string | null; status: string | null; locale: string | null; rand: number; created: Date }>(
       tx,
-      `SELECT id, doc, collection, slug, status, locale, rand, created FROM data WHERE ns = $1 AND collection != '_tombstone'`,
+      `SELECT id, doc, meta, collection, slug, status, locale, rand, created FROM data WHERE ns = $1 AND collection != '_tombstone'`,
       [branchNsId],
     )
 
     let merged = 0
-    for (const doc of docsResult.rows) {
-      const parsed = typeof doc.doc === 'string' ? JSON.parse(doc.doc) : { ...doc.doc as Record<string, unknown> }
-      const parentId = parsed._parent
-      delete parsed._parent
+    for (const row of docsResult.rows) {
+      const parsed = typeof row.doc === 'string' ? JSON.parse(row.doc) : { ...row.doc as Record<string, unknown> }
+      const rowMeta = (typeof row.meta === 'string' ? JSON.parse(row.meta) : row.meta) as Record<string, unknown> | null
+      const parentId = rowMeta?._parent as number | undefined
 
       if (parentId) {
         // Update existing parent document
         await query(
           tx,
-          `UPDATE data SET doc = $1, updated = now() WHERE ns = $2 AND id = $3`,
+          `UPDATE data SET doc = $1, version = version + 1, updated = now() WHERE ns = $2 AND id = $3`,
           [JSON.stringify(parsed), branch.parent, parentId],
         )
         // Copy rels from branch to parent (replace old parent rels)
@@ -78,7 +77,7 @@ export async function mergeBranch(
         const branchRels = await query<{ to: number; path: string; sort: number; meta: unknown }>(
           tx,
           `SELECT "to", path, sort, meta FROM rels WHERE ns = $1 AND "from" = $2`,
-          [branchNsId, doc.id],
+          [branchNsId, row.id],
         )
         for (const rel of branchRels.rows) {
           await query(
@@ -88,20 +87,6 @@ export async function mergeBranch(
             [branch.parent, parentId, rel.to, rel.path, rel.sort, rel.meta ? JSON.stringify(rel.meta) : null],
           )
         }
-        // Log the merge update in parent ns for CDC
-        await query(
-          tx,
-          `INSERT INTO log (ns, kind, entity, collection, doc, meta, rand, created)
-           VALUES ($1, 'data.updated', $2, $3, $4, $5, $6, now())`,
-          [branch.parent, parentId, doc.collection, JSON.stringify(parsed),
-           JSON.stringify({ source: 'merge', branch: branchNsId }), generateRand()],
-        )
-        // Queue for search reindexing
-        await query(
-          tx,
-          `INSERT INTO pending (ns, entity, collection, title, body) VALUES ($1, $2, $3, $4, $5)`,
-          [branch.parent, parentId, doc.collection, parsed.title ?? null, parsed.body ?? parsed.content ?? null],
-        )
       } else {
         // New document created in branch — insert into parent
         const newRow = await query<{ id: number }>(
@@ -109,13 +94,13 @@ export async function mergeBranch(
           `INSERT INTO data (ns, collection, slug, doc, status, locale, rand, created, updated)
            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, now())
            RETURNING id`,
-          [branch.parent, doc.collection, doc.slug, JSON.stringify(parsed), doc.status, doc.locale, doc.rand, doc.created],
+          [branch.parent, row.collection, row.slug, JSON.stringify(parsed), row.status, row.locale, row.rand, row.created],
         )
         // Copy rels from branch to parent for new doc
         const branchRels = await query<{ to: number; path: string; sort: number; meta: unknown }>(
           tx,
           `SELECT "to", path, sort, meta FROM rels WHERE ns = $1 AND "from" = $2`,
-          [branchNsId, doc.id],
+          [branchNsId, row.id],
         )
         for (const rel of branchRels.rows) {
           await query(
@@ -124,43 +109,22 @@ export async function mergeBranch(
             [branch.parent, newRow.rows[0].id, rel.to, rel.path, rel.sort, rel.meta ? JSON.stringify(rel.meta) : null],
           )
         }
-        // Log the merge create in parent ns for CDC
-        await query(
-          tx,
-          `INSERT INTO log (ns, kind, entity, collection, doc, meta, rand, created)
-           VALUES ($1, 'data.created', $2, $3, $4, $5, $6, now())`,
-          [branch.parent, newRow.rows[0].id, doc.collection, JSON.stringify(parsed),
-           JSON.stringify({ source: 'merge', branch: branchNsId }), generateRand()],
-        )
-        // Queue for search indexing
-        await query(
-          tx,
-          `INSERT INTO pending (ns, entity, collection, title, body) VALUES ($1, $2, $3, $4, $5)`,
-          [branch.parent, newRow.rows[0].id, doc.collection, parsed.title ?? null, parsed.body ?? parsed.content ?? null],
-        )
       }
       merged++
     }
 
     // Handle tombstones — delete from parent
-    const tombResult = await query<{ doc: unknown }>(
+    const tombResult = await query<{ meta: unknown }>(
       tx,
-      `SELECT doc FROM data WHERE ns = $1 AND collection = '_tombstone'`,
+      `SELECT meta FROM data WHERE ns = $1 AND collection = '_tombstone'`,
       [branchNsId],
     )
     let deleted = 0
     for (const t of tombResult.rows) {
-      const tombDoc = typeof t.doc === 'string' ? JSON.parse(t.doc) : t.doc as Record<string, unknown>
-      const { _parent } = tombDoc
+      const tombMeta = (typeof t.meta === 'string' ? JSON.parse(t.meta) : t.meta) as Record<string, unknown> | null
+      const _parent = tombMeta?._parent
       if (_parent) {
         await query(tx, `DELETE FROM data WHERE ns = $1 AND id = $2`, [branch.parent, _parent])
-        // Log the merge delete in parent ns for CDC
-        await query(
-          tx,
-          `INSERT INTO log (ns, kind, entity, meta, rand, created)
-           VALUES ($1, 'data.deleted', $2, $3, $4, now())`,
-          [branch.parent, _parent, JSON.stringify({ source: 'merge', branch: branchNsId }), generateRand()],
-        )
         deleted++
       }
     }
@@ -178,7 +142,6 @@ export async function cleanupBranch(
 ): Promise<void> {
   await transaction(pool, async (tx) => {
     await query(tx, `DELETE FROM rels WHERE ns = $1`, [branchNsId])
-    await query(tx, `DELETE FROM pending WHERE ns = $1`, [branchNsId])
     await query(tx, `DELETE FROM data WHERE ns = $1`, [branchNsId])
     await query(tx, `DELETE FROM ns WHERE id = $1`, [branchNsId])
   })

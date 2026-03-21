@@ -61,9 +61,8 @@ const DDL_FILES = [
   '002_data.sql',
   '003_actions.sql',
   '004_rels.sql',
-  '005_log.sql',
-  '006_pending.sql',
-  '007_search.sql',
+  '005_events.sql',
+  '006_search.sql',
 ]
 
 async function up() {
@@ -114,7 +113,7 @@ async function up() {
 async function down() {
   console.log('Dropping schema from', connectionString.replace(/:[^@]+@/, ':***@'))
 
-  const tables = ['search', 'pending', 'log', 'rels', 'actions', 'data', 'ns', 'migrations']
+  const tables = ['search', 'events', 'rels', 'actions', 'data', 'ns', 'migrations']
   for (const table of tables) {
     await pool.query(`DROP TABLE IF EXISTS ${table} CASCADE`)
     console.log(`  ✓ dropped ${table}`)
@@ -126,7 +125,7 @@ async function down() {
 async function status() {
   console.log('Schema status for', connectionString.replace(/:[^@]+@/, ':***@'))
 
-  const tables = ['ns', 'data', 'actions', 'rels', 'log', 'pending', 'search', 'migrations']
+  const tables = ['ns', 'data', 'actions', 'rels', 'events', 'search', 'migrations']
   for (const table of tables) {
     try {
       const r = await pool.query(`SELECT count(*) AS cnt FROM ${table}`)

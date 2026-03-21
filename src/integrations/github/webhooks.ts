@@ -1,7 +1,7 @@
 import type { PgPool } from '../../db/pg.js'
 import { query } from '../../db/pg.js'
 import { createBranch, mergeBranch, cleanupBranch } from '../../ns/branch.js'
-import { emit } from '../../db/queries/log.js'
+import { emit } from '../../db/queries/events.js'
 import type { NsRow } from '../../types.js'
 
 export interface GitHubWebhookConfig {

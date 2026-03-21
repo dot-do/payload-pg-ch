@@ -9,6 +9,7 @@ export interface InsertDataArgs {
   collection: string
   slug?: string | null
   doc: unknown
+  meta?: unknown
   status?: string | null
   locale?: string | null
   rand: number
@@ -21,14 +22,15 @@ export async function insertData(
 ): Promise<DataRow> {
   const result = await query<DataRow>(
     tx,
-    `INSERT INTO data (ns, collection, slug, doc, status, locale, rand, embedding)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+    `INSERT INTO data (ns, collection, slug, doc, meta, status, locale, rand, embedding)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
      RETURNING *`,
     [
       args.ns,
       args.collection,
       args.slug ?? null,
       JSON.stringify(args.doc),
+      args.meta ? JSON.stringify(args.meta) : '{}',
       args.status ?? null,
       args.locale ?? null,
       args.rand,
@@ -42,6 +44,7 @@ export interface UpdateDataArgs {
   ns: number
   id: number
   doc: unknown
+  meta?: unknown
   status?: string | null
   locale?: string | null
   embedding?: number[] | null
@@ -51,19 +54,37 @@ export async function updateData(
   tx: PgPoolClient,
   args: UpdateDataArgs,
 ): Promise<DataRow> {
+  const setClauses = [
+    'doc = $1',
+    'status = $2',
+    'locale = $3',
+    'embedding = $4',
+    'version = version + 1',
+    'updated = now()',
+  ]
+  const params: unknown[] = [
+    JSON.stringify(args.doc),
+    args.status ?? null,
+    args.locale ?? null,
+    formatVector(args.embedding),
+  ]
+  let paramIdx = 5
+
+  if (args.meta !== undefined) {
+    setClauses.push(`meta = $${paramIdx++}`)
+    params.push(JSON.stringify(args.meta))
+  }
+
+  params.push(args.id, args.ns)
+  const idParam = paramIdx++
+  const nsParam = paramIdx++
+
   const result = await query<DataRow>(
     tx,
-    `UPDATE data SET doc = $1, status = $2, locale = $3, embedding = $4, updated = now()
-     WHERE id = $5 AND ns = $6
+    `UPDATE data SET ${setClauses.join(', ')}
+     WHERE id = $${idParam} AND ns = $${nsParam}
      RETURNING *`,
-    [
-      JSON.stringify(args.doc),
-      args.status ?? null,
-      args.locale ?? null,
-      formatVector(args.embedding),
-      args.id,
-      args.ns,
-    ],
+    params,
   )
   if (result.rows.length === 0) {
     throw new Error(`Data row not found: id=${args.id} ns=${args.ns}`)

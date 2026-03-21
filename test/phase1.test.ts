@@ -200,58 +200,6 @@ describe('actions table as collection facade', () => {
   })
 })
 
-// ============================================================
-// BEAD iql: Versioned collection flag
-// ============================================================
-describe('versioned collection flag', () => {
-  it('versioned collections emit version.created log on update', async () => {
-    // Documents is versioned
-    const doc = await adapter.create({
-      ns: nsId,
-      collection: 'documents',
-      data: { title: 'V1', content: 'Initial content' },
-    })
-
-    await adapter.updateOne({
-      ns: nsId,
-      collection: 'documents',
-      id: doc.id,
-      data: { title: 'V2', content: 'Updated content' },
-    })
-
-    const logs = await query<{ kind: string; doc: Record<string, unknown> }>(
-      pool,
-      `SELECT kind, doc FROM log WHERE ns = $1 AND kind = 'version.created' ORDER BY created`,
-      [nsId],
-    )
-
-    expect(logs.rows.length).toBeGreaterThanOrEqual(1)
-    // Version log should have the full doc snapshot
-    expect(logs.rows[0].doc.title).toBeDefined()
-  })
-
-  it('non-versioned collections do NOT emit version.created log', async () => {
-    const chat = await adapter.create({
-      ns: nsId,
-      collection: 'chats',
-      data: { title: 'My Chat' },
-    })
-
-    await adapter.updateOne({
-      ns: nsId,
-      collection: 'chats',
-      id: chat.id,
-      data: { title: 'Renamed Chat' },
-    })
-
-    const versionLogs = await query(
-      pool,
-      `SELECT id FROM log WHERE ns = $1 AND kind = 'version.created'`,
-      [nsId],
-    )
-    expect(versionLogs.rows).toHaveLength(0)
-  })
-})
 
 // ============================================================
 // BEAD vqp: Noun schema to CollectionConfig compiler

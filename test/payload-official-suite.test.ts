@@ -48,8 +48,7 @@ beforeAll(async () => {
 
   // Clean all data
   await pool.query('DELETE FROM rels')
-  await pool.query('DELETE FROM pending')
-  await pool.query('DELETE FROM log')
+  await pool.query('DELETE FROM events')
   await pool.query('DELETE FROM actions')
   await pool.query('DELETE FROM data')
 
@@ -222,8 +221,7 @@ afterAll(async () => {
 beforeEach(async () => {
   const pool = getTestPool()
   await pool.query('DELETE FROM rels')
-  await pool.query('DELETE FROM pending')
-  await pool.query('DELETE FROM log')
+  await pool.query('DELETE FROM events')
   await pool.query('DELETE FROM actions')
   await pool.query('DELETE FROM data')
 })

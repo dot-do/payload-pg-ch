@@ -214,36 +214,30 @@ describe('E2E: Full content management workflow', () => {
     expect(indexBatch).toHaveLength(1)
     await adapter.complete({ id: indexJob, output: { indexed: 3 } })
 
-    // === 10. Verify full audit trail ===
-    const allLogs = await query<{ kind: string }>(
+    // === 10. Verify emit events in events table ===
+    const allEvents = await query<{ kind: string }>(
       pool,
-      `SELECT kind FROM log WHERE ns = $1 ORDER BY created`,
+      `SELECT kind FROM events WHERE ns = $1 ORDER BY created`,
       [nsId],
     )
 
-    const kinds = allLogs.rows.map(r => r.kind)
+    const kinds = allEvents.rows.map(r => r.kind)
 
-    // Should contain all lifecycle events including merge operations
-    expect(kinds).toContain('data.created')
-    expect(kinds).toContain('data.updated') // from merge
+    // Should contain emitted non-mutation events
     expect(kinds).toContain('page.viewed')
     expect(kinds).toContain('search.query')
-
-    // Count create events (users + categories + posts)
-    const createEvents = kinds.filter(k => k === 'data.created')
-    expect(createEvents.length).toBeGreaterThanOrEqual(4) // 2 users + 2 categories + posts
 
     // === 11. Verify relationships survived merge ===
     const post1Rels = await adapter.related({ id: post1.id, direction: 'from' })
     expect(post1Rels.length).toBeGreaterThan(0)
 
-    // === 12. Verify pending rows for search indexing ===
-    const pendingRows = await query<{ collection: string }>(
+    // === 12. Verify unindexed data rows exist (embedding IS NULL) ===
+    const unindexedRows = await query<{ collection: string }>(
       pool,
-      `SELECT collection FROM pending WHERE ns = $1`,
+      `SELECT collection FROM data WHERE ns = $1 AND embedding IS NULL`,
       [nsId],
     )
-    expect(pendingRows.rows.length).toBeGreaterThan(0)
+    expect(unindexedRows.rows.length).toBeGreaterThan(0)
   })
 })
 
@@ -281,13 +275,13 @@ describe('E2E: Multi-tenant isolation', () => {
     await adapter.emit({ ns: ns1, kind: 'page.viewed' })
     await adapter.emit({ ns: ns2, kind: 'page.viewed' })
 
-    const t1Logs = await query(pool, `SELECT id FROM log WHERE ns = $1`, [ns1])
-    const t2Logs = await query(pool, `SELECT id FROM log WHERE ns = $1`, [ns2])
+    const t1Events = await query(pool, `SELECT id FROM events WHERE ns = $1`, [ns1])
+    const t2Events = await query(pool, `SELECT id FROM events WHERE ns = $1`, [ns2])
 
-    // T1: 2 creates + 2 page views = 4
-    expect(t1Logs.rows.length).toBe(4)
-    // T2: 1 create + 1 page view = 2
-    expect(t2Logs.rows.length).toBe(2)
+    // T1: 2 page views (mutations no longer write to events)
+    expect(t1Events.rows.length).toBe(2)
+    // T2: 1 page view
+    expect(t2Events.rows.length).toBe(1)
 
     // Action queues are isolated
     await adapter.enqueue({ ns: ns1, kind: 'job', name: 'tenant1-job' })
