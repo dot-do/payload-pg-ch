@@ -2,7 +2,7 @@ CREATE TABLE actions (
   seq           BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
   id            TEXT NOT NULL,
   ns            TEXT NOT NULL,
-  kind          TEXT NOT NULL,
+  type          TEXT NOT NULL,
   name          TEXT NOT NULL,
   status        TEXT NOT NULL DEFAULT 'pending',
   input         JSONB,

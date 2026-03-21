@@ -170,7 +170,7 @@ CREATE TABLE actions (
   seq                   UInt64,
   id                    String,
   ns                    String,
-  kind                  LowCardinality(String),
+  type                  LowCardinality(String),
   name                  String,
   status                LowCardinality(String),
   input                 Nullable(String),
