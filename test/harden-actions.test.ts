@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest'
-import { getTestPool, setupTestSchema, cleanupTestData, teardownTestPool } from './setup.js'
+import { getTestPool, setupTestSchema, cleanupTestData, createTestNs, teardownTestPool } from './setup.js'
 import { DocumentAdapter } from '../src/adapter.js'
 import { fromSqid } from '../src/id/sqids.js'
 import { query } from '../src/db/pg.js'
@@ -9,7 +9,7 @@ const TEST_DB = process.env.TEST_DATABASE_URL ?? 'postgresql://postgres:test@loc
 
 let adapter: DocumentAdapter
 let pool: pg.Pool
-let nsId: number
+let ns: string
 
 beforeAll(async () => {
   pool = getTestPool() as unknown as pg.Pool
@@ -35,31 +35,27 @@ afterAll(async () => {
 beforeEach(async () => {
   await cleanupTestData()
 
-  const result = await query<{ id: number }>(
-    pool,
-    `INSERT INTO ns (uri, name, kind, branch) VALUES ('harden.test', 'Test', 'production', 'main') RETURNING id`,
-  )
-  nsId = result.rows[0].id
+  ns = await createTestNs('harden.test', 'Test')
   await adapter.nsResolver.refresh()
 })
 
 describe('findOne agent-run by sqid', () => {
   it('returns the action formatted as a doc', async () => {
     const created = await adapter.create({
-      ns: nsId,
-      collection: 'agent-runs',
-      data: { kind: 'agent-run', name: 'test-run', input: { prompt: 'hello' } },
+      ns,
+      type: 'agent-runs',
+      data: { type: 'agent-run', name: 'test-run', input: { prompt: 'hello' } },
     })
 
     const found = await adapter.findOne({
-      ns: nsId,
-      collection: 'agent-runs',
+      ns,
+      type: 'agent-runs',
       id: created.id,
     })
 
     expect(found).not.toBeNull()
     expect(found!.id).toBe(created.id)
-    expect(found!.kind).toBe('agent-run')
+    expect(found!.type).toBe('agent-run')
     expect(found!.name).toBe('test-run')
     expect(found!.status).toBe('pending')
   })
@@ -69,24 +65,24 @@ describe('find agent-runs filtered by status', () => {
   it('filters by status when where.status.equals is provided', async () => {
     // Create two agent-runs
     const run1 = await adapter.create({
-      ns: nsId,
-      collection: 'agent-runs',
-      data: { kind: 'agent-run', name: 'run1', input: {} },
+      ns,
+      type: 'agent-runs',
+      data: { type: 'agent-run', name: 'run1', input: {} },
     })
     await adapter.create({
-      ns: nsId,
-      collection: 'agent-runs',
-      data: { kind: 'agent-run', name: 'run2', input: {} },
+      ns,
+      type: 'agent-runs',
+      data: { type: 'agent-run', name: 'run2', input: {} },
     })
 
     // Dequeue and complete run1
-    await adapter.dequeue({ ns: nsId, kind: 'agent-run' })
+    await adapter.dequeue({ ns, type: 'agent-run' })
     await adapter.complete({ id: run1.id, output: { done: true } })
 
     // Find only completed runs
     const completed = await adapter.find({
-      ns: nsId,
-      collection: 'agent-runs',
+      ns,
+      type: 'agent-runs',
       where: { status: { equals: 'completed' } },
     })
     expect(completed.docs).toHaveLength(1)
@@ -94,8 +90,8 @@ describe('find agent-runs filtered by status', () => {
 
     // Find only pending runs
     const pending = await adapter.find({
-      ns: nsId,
-      collection: 'agent-runs',
+      ns,
+      type: 'agent-runs',
       where: { status: { equals: 'pending' } },
     })
     expect(pending.docs).toHaveLength(1)
@@ -105,8 +101,8 @@ describe('find agent-runs filtered by status', () => {
 
 describe('status guard: checkpoint on completed action is no-op', () => {
   it('does not modify a completed action', async () => {
-    const actionId = await adapter.enqueue({ ns: nsId, kind: 'job', name: 'guard-cp' })
-    await adapter.dequeue({ ns: nsId, kind: 'job' })
+    const actionId = await adapter.enqueue({ ns, type: 'job', name: 'guard-cp' })
+    await adapter.dequeue({ ns, type: 'job' })
     await adapter.complete({ id: actionId, output: { done: true } })
 
     // Checkpoint after complete should be a no-op
@@ -114,8 +110,8 @@ describe('status guard: checkpoint on completed action is no-op', () => {
 
     const row = await query<{ status: string; cursor: number; steps: unknown[] }>(
       pool,
-      `SELECT status, cursor, steps FROM actions WHERE id = $1`,
-      [fromSqid(actionId).id],
+      `SELECT status, cursor, steps FROM actions WHERE seq = $1`,
+      [fromSqid(actionId).seq],
     )
     expect(row.rows[0].status).toBe('completed')
     expect(row.rows[0].cursor).toBe(0) // unchanged
@@ -124,7 +120,7 @@ describe('status guard: checkpoint on completed action is no-op', () => {
 
 describe('status guard: complete on pending (never-dequeued) action is no-op', () => {
   it('does not mark a pending action as completed', async () => {
-    const actionId = await adapter.enqueue({ ns: nsId, kind: 'job', name: 'guard-comp' })
+    const actionId = await adapter.enqueue({ ns, type: 'job', name: 'guard-comp' })
     // Do NOT dequeue — action is still pending
 
     // Now try to complete: should be a no-op since the requirement says
@@ -133,8 +129,8 @@ describe('status guard: complete on pending (never-dequeued) action is no-op', (
 
     const row = await query<{ status: string; completed: Date | null }>(
       pool,
-      `SELECT status, completed FROM actions WHERE id = $1`,
-      [fromSqid(actionId).id],
+      `SELECT status, completed FROM actions WHERE seq = $1`,
+      [fromSqid(actionId).seq],
     )
     // After the status guard fix, pending actions should NOT be completable
     // But we need to be permissive for existing tests (pending + running are allowed)
@@ -147,8 +143,8 @@ describe('status guard: complete on pending (never-dequeued) action is no-op', (
 
 describe('status guard: fail on completed action is no-op', () => {
   it('does not modify a completed action', async () => {
-    const actionId = await adapter.enqueue({ ns: nsId, kind: 'job', name: 'guard-fail' })
-    await adapter.dequeue({ ns: nsId, kind: 'job' })
+    const actionId = await adapter.enqueue({ ns, type: 'job', name: 'guard-fail' })
+    await adapter.dequeue({ ns, type: 'job' })
     await adapter.complete({ id: actionId, output: { done: true } })
 
     // Fail after complete should be a no-op
@@ -156,8 +152,8 @@ describe('status guard: fail on completed action is no-op', () => {
 
     const row = await query<{ status: string; retries: number }>(
       pool,
-      `SELECT status, retries FROM actions WHERE id = $1`,
-      [fromSqid(actionId).id],
+      `SELECT status, retries FROM actions WHERE seq = $1`,
+      [fromSqid(actionId).seq],
     )
     expect(row.rows[0].status).toBe('completed')
     expect(row.rows[0].retries).toBe(0) // unchanged
@@ -166,14 +162,14 @@ describe('status guard: fail on completed action is no-op', () => {
 
 describe('fail with auto-retry resets started to NULL', () => {
   it('sets started to NULL when retrying', async () => {
-    const actionId = await adapter.enqueue({ ns: nsId, kind: 'job', name: 'retry-started' })
-    await adapter.dequeue({ ns: nsId, kind: 'job' })
+    const actionId = await adapter.enqueue({ ns, type: 'job', name: 'retry-started' })
+    await adapter.dequeue({ ns, type: 'job' })
 
     // Verify started is set after dequeue
     const before = await query<{ started: Date | null }>(
       pool,
-      `SELECT started FROM actions WHERE id = $1`,
-      [fromSqid(actionId).id],
+      `SELECT started FROM actions WHERE seq = $1`,
+      [fromSqid(actionId).seq],
     )
     expect(before.rows[0].started).not.toBeNull()
 
@@ -182,8 +178,8 @@ describe('fail with auto-retry resets started to NULL', () => {
 
     const after = await query<{ status: string; started: Date | null }>(
       pool,
-      `SELECT status, started FROM actions WHERE id = $1`,
-      [fromSqid(actionId).id],
+      `SELECT status, started FROM actions WHERE seq = $1`,
+      [fromSqid(actionId).seq],
     )
     expect(after.rows[0].status).toBe('pending')
     expect(after.rows[0].started).toBeNull()
@@ -192,8 +188,8 @@ describe('fail with auto-retry resets started to NULL', () => {
 
 describe('50 sequential checkpoints produce correct steps array', () => {
   it('accumulates all 50 steps', async () => {
-    const actionId = await adapter.enqueue({ ns: nsId, kind: 'workflow', name: 'big-steps' })
-    await adapter.dequeue({ ns: nsId, kind: 'workflow' })
+    const actionId = await adapter.enqueue({ ns, type: 'workflow', name: 'big-steps' })
+    await adapter.dequeue({ ns, type: 'workflow' })
 
     for (let i = 1; i <= 50; i++) {
       await adapter.checkpoint({ id: actionId, step: i, result: { i } })
@@ -201,8 +197,8 @@ describe('50 sequential checkpoints produce correct steps array', () => {
 
     const row = await query<{ steps: unknown[]; cursor: number }>(
       pool,
-      `SELECT steps, cursor FROM actions WHERE id = $1`,
-      [fromSqid(actionId).id],
+      `SELECT steps, cursor FROM actions WHERE seq = $1`,
+      [fromSqid(actionId).seq],
     )
     expect(row.rows[0].cursor).toBe(50)
     const steps = row.rows[0].steps as Array<{ i: number }>
@@ -216,23 +212,23 @@ describe('agent-run full lifecycle', () => {
   it('create -> findOne -> dequeue -> checkpoint -> complete -> findOne', async () => {
     // 1. Create
     const created = await adapter.create({
-      ns: nsId,
-      collection: 'agent-runs',
-      data: { kind: 'agent-run', name: 'lifecycle-run', input: { prompt: 'go' } },
+      ns,
+      type: 'agent-runs',
+      data: { type: 'agent-run', name: 'lifecycle-run', input: { prompt: 'go' } },
     })
     expect(created.id).toMatch(/^arn_/)
 
     // 2. FindOne after create
     const found1 = await adapter.findOne({
-      ns: nsId,
-      collection: 'agent-runs',
+      ns,
+      type: 'agent-runs',
       id: created.id,
     })
     expect(found1).not.toBeNull()
     expect(found1!.status).toBe('pending')
 
     // 3. Dequeue
-    const actions = await adapter.dequeue({ ns: nsId, kind: 'agent-run' })
+    const actions = await adapter.dequeue({ ns, type: 'agent-run' })
     expect(actions).toHaveLength(1)
     expect(actions[0].status).toBe('running')
 
@@ -244,8 +240,8 @@ describe('agent-run full lifecycle', () => {
 
     // 6. FindOne after complete
     const found2 = await adapter.findOne({
-      ns: nsId,
-      collection: 'agent-runs',
+      ns,
+      type: 'agent-runs',
       id: created.id,
     })
     expect(found2).not.toBeNull()
@@ -259,16 +255,16 @@ describe('enqueue with entity links to data row', () => {
   it('stores entity reference on the action', async () => {
     // Create an agent entity first
     const agent = await adapter.create({
-      ns: nsId,
-      collection: 'agents',
+      ns,
+      type: 'agents',
       data: { name: 'TestBot', model: 'gpt-4' },
     })
-    const agentIntId = fromSqid(agent.id).id
+    const agentIntId = fromSqid(agent.id).seq
 
     // Enqueue an action linked to the agent entity
     const actionId = await adapter.enqueue({
-      ns: nsId,
-      kind: 'agent-run',
+      ns,
+      type: 'agent-run',
       name: 'entity-linked',
       input: { prompt: 'test' },
       entity: agent.id,
@@ -277,8 +273,8 @@ describe('enqueue with entity links to data row', () => {
     // Verify the entity column is set
     const row = await query<{ entity: number }>(
       pool,
-      `SELECT entity FROM actions WHERE id = $1`,
-      [fromSqid(actionId).id],
+      `SELECT entity FROM actions WHERE seq = $1`,
+      [fromSqid(actionId).seq],
     )
     expect(row.rows[0].entity).toBe(agentIntId)
   })

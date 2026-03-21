@@ -3,7 +3,7 @@
  * Tests that the adapter handles all 38 platform collections correctly.
  */
 import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest'
-import { getTestPool, setupTestSchema, cleanupTestData, teardownTestPool } from './setup.js'
+import { getTestPool, setupTestSchema, cleanupTestData, createTestNs, teardownTestPool } from './setup.js'
 import { DocumentAdapter } from '../src/adapter.js'
 import { fromSqid } from '../src/id/sqids.js'
 import { query } from '../src/db/pg.js'
@@ -278,7 +278,7 @@ const PLATFORM_COLLECTIONS: Array<{
 
 let adapter: DocumentAdapter
 let pool: pg.Pool
-let nsId: number
+let ns: string
 
 beforeAll(async () => {
   pool = getTestPool() as unknown as pg.Pool
@@ -293,11 +293,7 @@ afterAll(async () => {
 
 beforeEach(async () => {
   await cleanupTestData()
-  const result = await query<{ id: number }>(
-    pool,
-    `INSERT INTO ns (uri, name, kind) VALUES ('platform.test', 'Platform', 'production') RETURNING id`,
-  )
-  nsId = result.rows[0].id
+  ns = await createTestNs('platform.test', 'Platform')
   await adapter.nsResolver.refresh()
 })
 
@@ -318,20 +314,20 @@ describe('platform.do collections: CRUD for all 27 collection types', () => {
         }
         // Skip relationships for this test — we'll test those separately
       }
-      const result = await adapter.create({ ns: nsId, collection: col.slug, data })
+      const result = await adapter.create({ ns, type: col.slug, data })
       created[col.slug] = result.id
       expect(result.id).toMatch(new RegExp(`^${col.prefix}_`))
     }
 
     // Verify each collection has exactly one doc
     for (const col of PLATFORM_COLLECTIONS) {
-      const found = await adapter.find({ ns: nsId, collection: col.slug })
+      const found = await adapter.find({ ns, type: col.slug })
       expect(found.total).toBe(1)
     }
 
     // Verify findOne by sqid works for each
     for (const col of PLATFORM_COLLECTIONS) {
-      const found = await adapter.findOne({ ns: nsId, collection: col.slug, id: created[col.slug] })
+      const found = await adapter.findOne({ ns, type: col.slug, id: created[col.slug] })
       expect(found).not.toBeNull()
       expect(found!.id).toBe(created[col.slug])
     }
@@ -342,98 +338,98 @@ describe('platform.do: relationship graph', () => {
   it('builds the full Agent → Model, Prompts, Tools → Function relationship chain', async () => {
     // Create the chain bottom-up
     const model = await adapter.create({
-      ns: nsId,
-      collection: 'models',
+      ns,
+      type: 'models',
       data: { name: 'Claude 4', slug: 'claude-4', modelId: 'claude-sonnet-4-6', contextWindow: 200000 },
     })
 
     const fn = await adapter.create({
-      ns: nsId,
-      collection: 'functions',
+      ns,
+      type: 'functions',
       data: { name: 'Search', slug: 'search', description: 'Search the web' },
     })
 
     const prompt = await adapter.create({
-      ns: nsId,
-      collection: 'prompts',
+      ns,
+      type: 'prompts',
       data: { name: 'System Prompt', slug: 'system', template: 'You are a helpful assistant.' },
     })
 
     const tool = await adapter.create({
-      ns: nsId,
-      collection: 'tools',
+      ns,
+      type: 'tools',
       data: {
         name: 'Web Search',
         slug: 'web-search',
         description: 'Search the web',
-        function: fromSqid(fn.id).id,
+        function: fromSqid(fn.id).seq,
         inputSchema: { type: 'object', properties: { query: { type: 'string' } } },
       },
     })
 
     const agent = await adapter.create({
-      ns: nsId,
-      collection: 'agents',
+      ns,
+      type: 'agents',
       data: {
         name: 'Research Agent',
         slug: 'research',
-        model: fromSqid(model.id).id,
-        prompts: [fromSqid(prompt.id).id],
-        tools: [fromSqid(tool.id).id],
+        model: fromSqid(model.id).seq,
+        prompts: [fromSqid(prompt.id).seq],
+        tools: [fromSqid(tool.id).seq],
         config: { temperature: 0.7, maxTokens: 4096 },
       },
     })
 
     // Verify the full relationship chain
-    const agentDoc = await adapter.findOne({ ns: nsId, collection: 'agents', id: agent.id })
+    const agentDoc = await adapter.findOne({ ns, type: 'agents', id: agent.id })
     expect(agentDoc!.name).toBe('Research Agent')
     expect(agentDoc!.model).toBe(model.id) // sqid
     expect((agentDoc!.prompts as string[])[0]).toBe(prompt.id)
     expect((agentDoc!.tools as string[])[0]).toBe(tool.id)
 
     // Tool → Function relationship
-    const toolDoc = await adapter.findOne({ ns: nsId, collection: 'tools', id: tool.id })
+    const toolDoc = await adapter.findOne({ ns, type: 'tools', id: tool.id })
     expect(toolDoc!.function).toBe(fn.id)
 
     // Verify rels table
     const agentRels = await query<{ path: string }>(
       pool,
       `SELECT path FROM rels WHERE "from" = $1 ORDER BY path`,
-      [fromSqid(agent.id).id],
+      [fromSqid(agent.id).seq],
     )
     expect(agentRels.rows.map(r => r.path)).toEqual(['model', 'prompts.0', 'tools.0'])
   })
 
   it('builds Action → Noun + Verb + Function + Workflow relationships', async () => {
     const noun = await adapter.create({
-      ns: nsId,
-      collection: 'nouns',
+      ns,
+      type: 'nouns',
       data: { name: 'Contact', slug: 'contact', plural: 'Contacts' },
     })
     const verb = await adapter.create({
-      ns: nsId,
-      collection: 'verbs',
+      ns,
+      type: 'verbs',
       data: { name: 'Create', slug: 'create', verb: 'create' },
     })
     const fn = await adapter.create({
-      ns: nsId,
-      collection: 'functions',
+      ns,
+      type: 'functions',
       data: { name: 'CreateContact', slug: 'create-contact' },
     })
 
     const action = await adapter.create({
-      ns: nsId,
-      collection: 'actions',
+      ns,
+      type: 'actions',
       data: {
         name: 'Create Contact',
         slug: 'create-contact',
-        noun: fromSqid(noun.id).id,
-        verb: fromSqid(verb.id).id,
-        function: fromSqid(fn.id).id,
+        noun: fromSqid(noun.id).seq,
+        verb: fromSqid(verb.id).seq,
+        function: fromSqid(fn.id).seq,
       },
     })
 
-    const actionDoc = await adapter.findOne({ ns: nsId, collection: 'actions', id: action.id })
+    const actionDoc = await adapter.findOne({ ns, type: 'actions', id: action.id })
     expect(actionDoc!.noun).toBe(noun.id)
     expect(actionDoc!.verb).toBe(verb.id)
     expect(actionDoc!.function).toBe(fn.id)
@@ -441,67 +437,67 @@ describe('platform.do: relationship graph', () => {
 
   it('builds self-referencing relationships (Org → parent Org, Domain → parent Domain)', async () => {
     const parentOrg = await adapter.create({
-      ns: nsId,
-      collection: 'organizations',
+      ns,
+      type: 'organizations',
       data: { name: 'Acme Corp', slug: 'acme', domain: 'acme.com' },
     })
 
     const childOrg = await adapter.create({
-      ns: nsId,
-      collection: 'organizations',
+      ns,
+      type: 'organizations',
       data: {
         name: 'Acme Labs',
         slug: 'acme-labs',
-        parent: fromSqid(parentOrg.id).id,
+        parent: fromSqid(parentOrg.id).seq,
       },
     })
 
-    const childDoc = await adapter.findOne({ ns: nsId, collection: 'organizations', id: childOrg.id })
+    const childDoc = await adapter.findOne({ ns, type: 'organizations', id: childOrg.id })
     expect(childDoc!.parent).toBe(parentOrg.id)
 
     // Same for domains
     const rootDomain = await adapter.create({
-      ns: nsId,
-      collection: 'domains',
+      ns,
+      type: 'domains',
       data: { name: 'acme.com' },
     })
     const subDomain = await adapter.create({
-      ns: nsId,
-      collection: 'domains',
-      data: { name: 'api.acme.com', parent: fromSqid(rootDomain.id).id },
+      ns,
+      type: 'domains',
+      data: { name: 'api.acme.com', parent: fromSqid(rootDomain.id).seq },
     })
 
-    const subDoc = await adapter.findOne({ ns: nsId, collection: 'domains', id: subDomain.id })
+    const subDoc = await adapter.findOne({ ns, type: 'domains', id: subDomain.id })
     expect(subDoc!.parent).toBe(rootDomain.id)
   })
 
   it('builds Workflow with array of Function steps', async () => {
     const fn1 = await adapter.create({
-      ns: nsId,
-      collection: 'functions',
+      ns,
+      type: 'functions',
       data: { name: 'Fetch', slug: 'fetch' },
     })
     const fn2 = await adapter.create({
-      ns: nsId,
-      collection: 'functions',
+      ns,
+      type: 'functions',
       data: { name: 'Transform', slug: 'transform' },
     })
     const fn3 = await adapter.create({
-      ns: nsId,
-      collection: 'functions',
+      ns,
+      type: 'functions',
       data: { name: 'Load', slug: 'load' },
     })
 
     const workflow = await adapter.create({
-      ns: nsId,
-      collection: 'workflows',
+      ns,
+      type: 'workflows',
       data: {
         name: 'ETL Pipeline',
         slug: 'etl',
         steps: [
-          { name: 'Fetch Data', function: fromSqid(fn1.id).id, config: { url: 'https://api.example.com' } },
-          { name: 'Transform', function: fromSqid(fn2.id).id, config: { format: 'json' } },
-          { name: 'Load', function: fromSqid(fn3.id).id, config: { target: 'warehouse' } },
+          { name: 'Fetch Data', function: fromSqid(fn1.id).seq, config: { url: 'https://api.example.com' } },
+          { name: 'Transform', function: fromSqid(fn2.id).seq, config: { format: 'json' } },
+          { name: 'Load', function: fromSqid(fn3.id).seq, config: { target: 'warehouse' } },
         ],
       },
     })
@@ -510,7 +506,7 @@ describe('platform.do: relationship graph', () => {
     const rels = await query<{ path: string; to: number }>(
       pool,
       `SELECT path, "to" FROM rels WHERE "from" = $1 ORDER BY path`,
-      [fromSqid(workflow.id).id],
+      [fromSqid(workflow.id).seq],
     )
     expect(rels.rows).toHaveLength(3)
     expect(rels.rows[0].path).toBe('steps.0.function')
@@ -520,27 +516,27 @@ describe('platform.do: relationship graph', () => {
 
   it('builds Resource → Sources (hasMany) relationship', async () => {
     const s1 = await adapter.create({
-      ns: nsId,
-      collection: 'sources',
+      ns,
+      type: 'sources',
       data: { name: 'Apollo', slug: 'apollo', apiBaseUrl: 'https://api.apollo.io' },
     })
     const s2 = await adapter.create({
-      ns: nsId,
-      collection: 'sources',
+      ns,
+      type: 'sources',
       data: { name: 'Clearbit', slug: 'clearbit', apiBaseUrl: 'https://api.clearbit.com' },
     })
 
     const resource = await adapter.create({
-      ns: nsId,
-      collection: 'resources',
+      ns,
+      type: 'resources',
       data: {
         name: 'Company Enrichment',
         slug: 'company-enrichment',
-        sources: [fromSqid(s1.id).id, fromSqid(s2.id).id],
+        sources: [fromSqid(s1.id).seq, fromSqid(s2.id).seq],
       },
     })
 
-    const resourceDoc = await adapter.findOne({ ns: nsId, collection: 'resources', id: resource.id })
+    const resourceDoc = await adapter.findOne({ ns, type: 'resources', id: resource.id })
     const sources = resourceDoc!.sources as string[]
     expect(sources).toHaveLength(2)
     expect(sources).toContain(s1.id)
@@ -570,12 +566,12 @@ describe('platform.do: JSON field handling', () => {
     }
 
     const noun = await adapter.create({
-      ns: nsId,
-      collection: 'nouns',
+      ns,
+      type: 'nouns',
       data: { name: 'Contact', slug: 'contact', plural: 'Contacts', schema },
     })
 
-    const found = await adapter.findOne({ ns: nsId, collection: 'nouns', id: noun.id })
+    const found = await adapter.findOne({ ns, type: 'nouns', id: noun.id })
     const storedSchema = found!.schema as Record<string, unknown>
     expect(storedSchema.type).toBe('object')
     const props = storedSchema.properties as Record<string, unknown>
@@ -585,8 +581,8 @@ describe('platform.do: JSON field handling', () => {
 
   it('stores and retrieves workflow step config', async () => {
     const workflow = await adapter.create({
-      ns: nsId,
-      collection: 'workflows',
+      ns,
+      type: 'workflows',
       data: {
         name: 'Complex Flow',
         slug: 'complex',
@@ -596,7 +592,7 @@ describe('platform.do: JSON field handling', () => {
       },
     })
 
-    const found = await adapter.findOne({ ns: nsId, collection: 'workflows', id: workflow.id })
+    const found = await adapter.findOne({ ns, type: 'workflows', id: workflow.id })
     const steps = found!.steps as Array<Record<string, unknown>>
     const config = steps[0].config as Record<string, unknown>
     expect(config.retry).toBe(3)
@@ -606,13 +602,13 @@ describe('platform.do: JSON field handling', () => {
 
 describe('platform.do: where queries across collection types', () => {
   it('filters agents by status', async () => {
-    await adapter.create({ ns: nsId, collection: 'agents', data: { name: 'Active Agent', status: 'Active' } })
-    await adapter.create({ ns: nsId, collection: 'agents', data: { name: 'Draft Agent', status: 'Draft' } })
-    await adapter.create({ ns: nsId, collection: 'agents', data: { name: 'Paused Agent', status: 'Paused' } })
+    await adapter.create({ ns, type: 'agents', data: { name: 'Active Agent', status: 'Active' } })
+    await adapter.create({ ns, type: 'agents', data: { name: 'Draft Agent', status: 'Draft' } })
+    await adapter.create({ ns, type: 'agents', data: { name: 'Paused Agent', status: 'Paused' } })
 
     const active = await adapter.find({
-      ns: nsId,
-      collection: 'agents',
+      ns,
+      type: 'agents',
       where: { status: { equals: 'Active' } },
     })
     expect(active.total).toBe(1)
@@ -620,12 +616,12 @@ describe('platform.do: where queries across collection types', () => {
   })
 
   it('finds organizations by domain', async () => {
-    await adapter.create({ ns: nsId, collection: 'organizations', data: { name: 'Acme', domain: 'acme.com' } })
-    await adapter.create({ ns: nsId, collection: 'organizations', data: { name: 'Beta', domain: 'beta.io' } })
+    await adapter.create({ ns, type: 'organizations', data: { name: 'Acme', domain: 'acme.com' } })
+    await adapter.create({ ns, type: 'organizations', data: { name: 'Beta', domain: 'beta.io' } })
 
     const result = await adapter.find({
-      ns: nsId,
-      collection: 'organizations',
+      ns,
+      type: 'organizations',
       where: { domain: { equals: 'acme.com' } },
     })
     expect(result.total).toBe(1)
@@ -633,13 +629,13 @@ describe('platform.do: where queries across collection types', () => {
   })
 
   it('searches functions by name contains', async () => {
-    await adapter.create({ ns: nsId, collection: 'functions', data: { name: 'fetchUserProfile', slug: 'fetch-user' } })
-    await adapter.create({ ns: nsId, collection: 'functions', data: { name: 'createOrder', slug: 'create-order' } })
-    await adapter.create({ ns: nsId, collection: 'functions', data: { name: 'fetchOrderHistory', slug: 'fetch-orders' } })
+    await adapter.create({ ns, type: 'functions', data: { name: 'fetchUserProfile', slug: 'fetch-user' } })
+    await adapter.create({ ns, type: 'functions', data: { name: 'createOrder', slug: 'create-order' } })
+    await adapter.create({ ns, type: 'functions', data: { name: 'fetchOrderHistory', slug: 'fetch-orders' } })
 
     const fetchFns = await adapter.find({
-      ns: nsId,
-      collection: 'functions',
+      ns,
+      type: 'functions',
       where: { name: { contains: 'fetch' } },
     })
     expect(fetchFns.total).toBe(2)

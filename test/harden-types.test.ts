@@ -139,8 +139,8 @@ describe('Sqid edge cases', () => {
     const sqid = toSqid('users', 0, 0, new Date(0), 0)
     const parsed = fromSqid(sqid)
     expect(parsed.prefix).toBe('usr')
-    expect(parsed.ns).toBe(0)
-    expect(parsed.id).toBe(0)
+    expect(parsed.nsHash).toBe(0)
+    expect(parsed.seq).toBe(0)
     expect(parsed.epoch).toBe(0)
     expect(parsed.rand).toBe(0)
   })
@@ -150,7 +150,7 @@ describe('Sqid edge cases', () => {
     const largeId = Number.MAX_SAFE_INTEGER - 1
     const sqid = toSqid('users', largeId, 1, new Date('2025-01-01'), 42)
     const parsed = fromSqid(sqid)
-    expect(parsed.id).toBe(largeId)
+    expect(parsed.seq).toBe(largeId)
   })
 
   it('fromSqid with multiple underscores uses first separator', () => {
@@ -158,7 +158,7 @@ describe('Sqid edge cases', () => {
     const sqid = toSqid('users', 123, 1, new Date('2025-06-15'), 999)
     const parsed = fromSqid(sqid)
     expect(parsed.prefix).toBe('usr')
-    expect(parsed.id).toBe(123)
+    expect(parsed.seq).toBe(123)
 
     // Verify indexOf behavior: take a valid sqid and prepend an extra prefix
     // e.g. "x_usr_ENCODED" — first underscore splits at 'x' and 'usr_ENCODED'

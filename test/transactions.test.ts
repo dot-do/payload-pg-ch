@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest'
-import { getTestPool, setupTestSchema, cleanupTestData, teardownTestPool } from './setup.js'
+import { getTestPool, setupTestSchema, cleanupTestData, createTestNs, teardownTestPool } from './setup.js'
 import { DocumentAdapter } from '../src/adapter.js'
 import { query, transaction } from '../src/db/pg.js'
 import { fromSqid } from '../src/id/sqids.js'
@@ -9,12 +9,12 @@ const TEST_DB = process.env.TEST_DATABASE_URL ?? 'postgresql://postgres:test@loc
 
 let adapter: DocumentAdapter
 let pool: pg.Pool
-let nsId: number
+let ns: string
 
 beforeAll(async () => {
   pool = getTestPool() as unknown as pg.Pool
   await setupTestSchema()
-  adapter = new DocumentAdapter({ postgres: TEST_DB }, [
+  adapter = new DocumentAdapter({ postgres: TEST_DB, ns: 'tx.test' }, [
     {
       slug: 'posts',
       prefix: 'pos',
@@ -34,92 +34,83 @@ afterAll(async () => {
 
 beforeEach(async () => {
   await cleanupTestData()
-  const result = await query<{ id: number }>(
-    pool,
-    `INSERT INTO ns (uri, name, kind) VALUES ('tx.test', 'Tx', 'production') RETURNING id`,
-  )
-  nsId = result.rows[0].id
+  ns = await createTestNs('tx.test', 'Tx')
   await adapter.nsResolver.refresh()
 })
 
 describe('transaction atomicity', () => {
   it('create is atomic: data + rels all succeed or all fail', async () => {
-    const user = await adapter.create({ ns: nsId, collection: 'users', data: { name: 'Author' } })
-    const userId = fromSqid(user.id).id
+    const user = await adapter.create({ ns, type: 'users', data: { name: 'Author' } })
+    const userId = fromSqid(user.id).seq
 
     const post = await adapter.create({
-      ns: nsId,
-      collection: 'posts',
+      ns,
+      type: 'posts',
       data: { title: 'Atomic Post', author: userId },
       actor: userId,
       meta: { ip: '1.2.3.4', agent: 'test', method: 'POST', path: '/api/posts' },
     })
 
-    const postId = fromSqid(post.id).id
+    const postSeq = fromSqid(post.id).seq
 
-    // Data and rels should have entries
-    const data = await query(pool, `SELECT id FROM data WHERE id = $1`, [postId])
-    const rels = await query(pool, `SELECT id FROM rels WHERE "from" = $1`, [postId])
+    const data = await query(pool, `SELECT seq FROM data WHERE seq = $1`, [postSeq])
+    const rels = await query(pool, `SELECT seq FROM rels WHERE "from" = $1`, [postSeq])
 
     expect(data.rows).toHaveLength(1)
     expect(rels.rows).toHaveLength(1)
   })
 
   it('update is atomic: data + rels', async () => {
-    const user1 = await adapter.create({ ns: nsId, collection: 'users', data: { name: 'Author1' } })
-    const user2 = await adapter.create({ ns: nsId, collection: 'users', data: { name: 'Author2' } })
-    const user1Id = fromSqid(user1.id).id
-    const user2Id = fromSqid(user2.id).id
+    const user1 = await adapter.create({ ns, type: 'users', data: { name: 'Author1' } })
+    const user2 = await adapter.create({ ns, type: 'users', data: { name: 'Author2' } })
+    const user1Id = fromSqid(user1.id).seq
+    const user2Id = fromSqid(user2.id).seq
 
     const post = await adapter.create({
-      ns: nsId,
-      collection: 'posts',
+      ns,
+      type: 'posts',
       data: { title: 'V1', author: user1Id },
     })
-    const postId = fromSqid(post.id).id
+    const postSeq = fromSqid(post.id).seq
 
-    // Update with new author
     await adapter.updateOne({
-      ns: nsId,
-      collection: 'posts',
+      ns,
+      type: 'posts',
       id: post.id,
       data: { title: 'V2', author: user2Id },
     })
 
-    // Rels should point to user2 now
-    const rels = await query<{ to: number }>(pool, `SELECT "to" FROM rels WHERE "from" = $1`, [postId])
+    const rels = await query<{ to: number }>(pool, `SELECT "to" FROM rels WHERE "from" = $1`, [postSeq])
     expect(rels.rows).toHaveLength(1)
     expect(rels.rows[0].to).toBe(user2Id)
   })
 
   it('delete is atomic: data removal', async () => {
     const post = await adapter.create({
-      ns: nsId,
-      collection: 'posts',
+      ns,
+      type: 'posts',
       data: { title: 'To Delete' },
     })
-    const postId = fromSqid(post.id).id
+    const postSeq = fromSqid(post.id).seq
 
     await adapter.deleteMany({
-      ns: nsId,
-      collection: 'posts',
+      ns,
+      type: 'posts',
       where: { title: { equals: 'To Delete' } },
     })
 
-    // Data should be gone
-    const data = await query(pool, `SELECT id FROM data WHERE id = $1`, [postId])
+    const data = await query(pool, `SELECT seq FROM data WHERE seq = $1`, [postSeq])
     expect(data.rows).toHaveLength(0)
   })
 
   it('failed transaction rolls back completely', async () => {
-    const countBefore = await query<{ cnt: number }>(pool, `SELECT count(*) AS cnt FROM data WHERE ns = $1`, [nsId])
+    const countBefore = await query<{ cnt: number }>(pool, `SELECT count(*) AS cnt FROM data WHERE ns = $1`, [ns])
 
-    // This should fail because the transaction function will throw
     try {
       await transaction(pool, async (tx) => {
         await tx.query(
-          `INSERT INTO data (ns, collection, doc, rand) VALUES ($1, 'posts', '{"title":"Ghost"}', 999)`,
-          [nsId],
+          `INSERT INTO data (ns, type, id, data, rand) VALUES ($1, 'posts', 'ghost-1', '{"title":"Ghost"}', 999)`,
+          [ns],
         )
         throw new Error('Intentional rollback')
       })
@@ -127,8 +118,7 @@ describe('transaction atomicity', () => {
       // Expected
     }
 
-    // Count should be unchanged
-    const countAfter = await query<{ cnt: number }>(pool, `SELECT count(*) AS cnt FROM data WHERE ns = $1`, [nsId])
+    const countAfter = await query<{ cnt: number }>(pool, `SELECT count(*) AS cnt FROM data WHERE ns = $1`, [ns])
     expect(countAfter.rows[0].cnt).toBe(countBefore.rows[0].cnt)
   })
 })
@@ -137,22 +127,21 @@ describe('transaction atomicity', () => {
 describe('action queue safety', () => {
   it('all enqueued actions are dequeued exactly once', async () => {
     for (let i = 0; i < 5; i++) {
-      await adapter.enqueue({ ns: nsId, kind: 'ordered', name: `job-${i}` })
+      await adapter.enqueue({ ns, type: 'ordered', name: `job-${i}` })
     }
 
-    const batch = await adapter.dequeue({ ns: nsId, kind: 'ordered', limit: 5 })
+    const batch = await adapter.dequeue({ ns, type: 'ordered', limit: 5 })
     expect(batch).toHaveLength(5)
-    // All 5 jobs dequeued, no duplicates
     const names = batch.map(a => a.name).sort()
     expect(names).toEqual(['job-0', 'job-1', 'job-2', 'job-3', 'job-4'])
   })
 
-  it('different kinds are independent', async () => {
-    await adapter.enqueue({ ns: nsId, kind: 'email', name: 'send-email' })
-    await adapter.enqueue({ ns: nsId, kind: 'webhook', name: 'call-webhook' })
+  it('different types are independent', async () => {
+    await adapter.enqueue({ ns, type: 'email', name: 'send-email' })
+    await adapter.enqueue({ ns, type: 'webhook', name: 'call-webhook' })
 
-    const emails = await adapter.dequeue({ ns: nsId, kind: 'email', limit: 10 })
-    const webhooks = await adapter.dequeue({ ns: nsId, kind: 'webhook', limit: 10 })
+    const emails = await adapter.dequeue({ ns, type: 'email', limit: 10 })
+    const webhooks = await adapter.dequeue({ ns, type: 'webhook', limit: 10 })
 
     expect(emails).toHaveLength(1)
     expect(emails[0].name).toBe('send-email')
@@ -161,18 +150,18 @@ describe('action queue safety', () => {
   })
 
   it('checkpoint preserves step order', async () => {
-    const id = await adapter.enqueue({ ns: nsId, kind: 'workflow', name: 'multi' })
-    await adapter.dequeue({ ns: nsId, kind: 'workflow' })
+    const id = await adapter.enqueue({ ns, type: 'workflow', name: 'multi' })
+    await adapter.dequeue({ ns, type: 'workflow' })
 
     await adapter.checkpoint({ id, step: 1, result: { step: 'fetch' } })
     await adapter.checkpoint({ id, step: 2, result: { step: 'transform' } })
     await adapter.checkpoint({ id, step: 3, result: { step: 'load' } })
 
-    const intId = fromSqid(id).id
+    const seq = fromSqid(id).seq
     const action = await query<{ steps: unknown[]; cursor: number }>(
       pool,
-      `SELECT steps, cursor FROM actions WHERE id = $1`,
-      [intId],
+      `SELECT steps, cursor FROM actions WHERE seq = $1`,
+      [seq],
     )
 
     expect(action.rows[0].cursor).toBe(3)
@@ -184,17 +173,17 @@ describe('action queue safety', () => {
   })
 
   it('complete after checkpoint preserves steps', async () => {
-    const id = await adapter.enqueue({ ns: nsId, kind: 'workflow', name: 'complete-after-cp' })
-    await adapter.dequeue({ ns: nsId, kind: 'workflow' })
+    const id = await adapter.enqueue({ ns, type: 'workflow', name: 'complete-after-cp' })
+    await adapter.dequeue({ ns, type: 'workflow' })
 
     await adapter.checkpoint({ id, step: 1, result: { done: 'step1' } })
     await adapter.complete({ id, output: { final: 'result' } })
 
-    const intId = fromSqid(id).id
+    const seq = fromSqid(id).seq
     const action = await query<{ status: string; steps: unknown[]; output: Record<string, unknown> }>(
       pool,
-      `SELECT status, steps, output FROM actions WHERE id = $1`,
-      [intId],
+      `SELECT status, steps, output FROM actions WHERE seq = $1`,
+      [seq],
     )
 
     expect(action.rows[0].status).toBe('completed')
@@ -206,7 +195,7 @@ describe('action queue safety', () => {
 describe('emit variations', () => {
   it('emit page view event', async () => {
     await adapter.emit({
-      ns: nsId,
+      ns,
       kind: 'page.viewed',
       meta: { path: '/blog/hello', referrer: 'google.com', duration: 4500 },
     })
@@ -214,21 +203,21 @@ describe('emit variations', () => {
     const events = await query<{ kind: string; meta: Record<string, unknown> }>(
       pool,
       `SELECT kind, meta FROM events WHERE ns = $1 AND kind = 'page.viewed'`,
-      [nsId],
+      [ns],
     )
     expect(events.rows).toHaveLength(1)
     expect(events.rows[0].meta.duration).toBe(4500)
   })
 
   it('emit multiple event kinds', async () => {
-    await adapter.emit({ ns: nsId, kind: 'auth.login', actor: 1 })
-    await adapter.emit({ ns: nsId, kind: 'search.query', meta: { query: 'test', results: 5 } })
-    await adapter.emit({ ns: nsId, kind: 'ai.generated', entity: 1, actor: 1, meta: { tokens: 500 } })
+    await adapter.emit({ ns, kind: 'auth.login', actor: 1 })
+    await adapter.emit({ ns, kind: 'search.query', meta: { query: 'test', results: 5 } })
+    await adapter.emit({ ns, kind: 'ai.generated', entity: 1, actor: 1, meta: { tokens: 500 } })
 
     const events = await query<{ kind: string }>(
       pool,
       `SELECT kind FROM events WHERE ns = $1 ORDER BY created`,
-      [nsId],
+      [ns],
     )
     expect(events.rows.map(r => r.kind)).toEqual(['auth.login', 'search.query', 'ai.generated'])
   })

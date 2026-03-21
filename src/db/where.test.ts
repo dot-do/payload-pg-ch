@@ -10,7 +10,7 @@ describe('whereToSQL', () => {
 
   it('compiles JSON path query for non-promoted field', () => {
     const result = whereToSQL({ title: { equals: 'Hello' } })
-    expect(result.sql).toContain("data.doc->>'title' = $1")
+    expect(result.sql).toContain("data.data->>'title' = $1")
     expect(result.params).toEqual(['Hello'])
   })
 
@@ -61,13 +61,13 @@ describe('whereToSQL', () => {
   })
 
   it('compiles greater_than', () => {
-    const result = whereToSQL({ id: { greater_than: 100 } })
+    const result = whereToSQL({ seq: { greater_than: 100 } })
     expect(result.sql).toContain('>')
     expect(result.params).toEqual([100])
   })
 
   it('compiles less_than', () => {
-    const result = whereToSQL({ id: { less_than: 50 } })
+    const result = whereToSQL({ seq: { less_than: 50 } })
     expect(result.sql).toContain('<')
     expect(result.params).toEqual([50])
   })
@@ -79,7 +79,7 @@ describe('whereToSQL', () => {
 
   it('compiles exists for JSON field', () => {
     const result = whereToSQL({ title: { exists: true } })
-    expect(result.sql).toContain("data.doc ? 'title'")
+    expect(result.sql).toContain("data.data ? 'title'")
   })
 
   it('handles empty where', () => {

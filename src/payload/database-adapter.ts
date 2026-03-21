@@ -34,8 +34,8 @@ import { fromSqid } from '../id/sqids.js'
 
 export interface DocumentDBAdapterConfig {
   postgres: string
-  /** Namespace URI (domain/baseURL). Auto-creates if not found. Default: 'localhost' */
-  ns?: string | number
+  /** Namespace string (domain/baseURL). Auto-creates if not found. Default: 'localhost' */
+  ns?: string
   collections?: Record<string, { prefix: string }>
 }
 
@@ -81,11 +81,6 @@ function normalizeSort(sort: unknown): string | undefined {
 }
 
 /**
- * Convert a Payload Where clause to our internal Where type.
- * Payload uses the same operator format so this is mostly a passthrough,
- * but we need to handle the `id` field specially since Payload uses sqid strings.
- */
-/**
  * Fields that Payload passes in data but should not be persisted.
  * Official adapters exclude these implicitly (Drizzle via allowlist, Mongoose via strict mode).
  * Since we store as JSONB, we must explicitly strip them.
@@ -93,7 +88,7 @@ function normalizeSort(sort: unknown): string | undefined {
 const NON_PERSISTABLE_FIELDS = new Set([
   'confirm-password',  // Form validation field, never persist
   '_strategy',         // Runtime auth context, added after read
-  'collection',        // Stored as a column, not in doc. Added by Payload after read
+  'collection',        // Stored as type column, not in data. Added by Payload after read
 ])
 
 function sanitizeData(data: Record<string, unknown>): Record<string, unknown> {
@@ -108,7 +103,7 @@ function sanitizeData(data: Record<string, unknown>): Record<string, unknown> {
 
 function decodeSqidValue(value: unknown): unknown {
   if (typeof value === 'string' && value.includes('_')) {
-    try { return fromSqid(value).id } catch { return value }
+    try { return fromSqid(value).seq } catch { return value }
   }
   return value
 }
@@ -118,8 +113,7 @@ function convertWhere(where: Where | undefined): InternalWhere | undefined {
 
   const converted = JSON.parse(JSON.stringify(where)) as Record<string, unknown>
 
-  // Recursively decode sqid string values to integer IDs
-  // This handles: { id: { equals: "usr_xxx" } }, { author: { in: ["usr_xxx"] } }, etc.
+  // Recursively decode sqid string values to integer seq values
   function decodeOps(ops: Record<string, unknown>) {
     if (ops.equals !== undefined) ops.equals = decodeSqidValue(ops.equals)
     if (ops.not_equals !== undefined) ops.not_equals = decodeSqidValue(ops.not_equals)
@@ -127,7 +121,7 @@ function convertWhere(where: Where | undefined): InternalWhere | undefined {
     if (ops.not_in && Array.isArray(ops.not_in)) ops.not_in = ops.not_in.map(decodeSqidValue)
   }
 
-  // Only decode sqid values for the `id` field — other fields store sqids as strings
+  // Only decode sqid values for the `id` field
   function walk(obj: Record<string, unknown>) {
     for (const [key, val] of Object.entries(obj)) {
       if (key === 'and' || key === 'or') {
@@ -144,7 +138,6 @@ function convertWhere(where: Where | undefined): InternalWhere | undefined {
 
 /**
  * Flatten a document from our adapter format to what Payload expects.
- * Our adapter returns { id, ...docFields } which is what Payload wants.
  */
 function toPayloadDoc(result: { id: string } & Record<string, unknown>): Record<string, unknown> {
   return {
@@ -155,8 +148,7 @@ function toPayloadDoc(result: { id: string } & Record<string, unknown>): Record<
 }
 
 export function documentDBAdapter(config: DocumentDBAdapterConfig): DatabaseAdapterObj {
-  const nsConfig = config.ns ?? 'localhost'
-  let ns = typeof nsConfig === 'number' ? nsConfig : 0  // resolved on connect
+  const ns = config.ns ?? 'localhost'
 
   return {
     defaultIDType: 'text',
@@ -164,6 +156,7 @@ export function documentDBAdapter(config: DocumentDBAdapterConfig): DatabaseAdap
     init: (args: { payload: Payload }) => {
       const adapter = new DocumentAdapter({
         postgres: config.postgres,
+        ns,
         collections: config.collections,
       })
 
@@ -184,30 +177,23 @@ export function documentDBAdapter(config: DocumentDBAdapterConfig): DatabaseAdap
             console.warn('[payload-pg-ch] data table not found. Run: npm run migrate:up')
           }
 
-          // Resolve namespace: accept URI string or integer ID
-          if (typeof nsConfig === 'string') {
-            // Look up by URI, auto-create if not found
-            const existing = await query<{ id: number }>(
-              adapter.pool, 'SELECT id FROM ns WHERE uri = $1', [nsConfig],
-            )
-            if (existing.rows.length > 0) {
-              ns = existing.rows[0].id
-              console.log(`[payload-pg-ch] Namespace '${nsConfig}' resolved to id=${ns}`)
-            } else {
-              const created = await query<{ id: number }>(
-                adapter.pool,
-                `INSERT INTO ns (uri, name, kind) VALUES ($1, $2, 'production') RETURNING id`,
-                [nsConfig, nsConfig],
-              )
-              ns = created.rows[0].id
-              console.log(`[payload-pg-ch] Auto-created namespace '${nsConfig}' with id=${ns}`)
-            }
+          // Ensure namespace doc exists, auto-create if not found
+          const existing = await query<{ seq: number }>(
+            adapter.pool,
+            `SELECT seq FROM data WHERE type = 'namespaces' AND ns = $1 LIMIT 1`,
+            [ns],
+          )
+          if (existing.rows.length > 0) {
+            console.log(`[payload-pg-ch] Namespace '${ns}' found`)
           } else {
-            // Verify integer ns exists
-            const check = await query<{ id: number }>(adapter.pool, 'SELECT id FROM ns WHERE id = $1', [ns])
-            if (check.rows.length === 0) {
-              throw new Error(`[payload-pg-ch] Namespace id=${ns} not found. Run: npm run migrate:seed`)
-            }
+            await query(
+              adapter.pool,
+              `INSERT INTO data (id, ns, type, name, data, meta, rand)
+               VALUES ($1, $2, 'namespaces', $3, '{}', '{"kind":"production"}', 0)`,
+              [ns, ns, ns],
+            )
+            console.log(`[payload-pg-ch] Auto-created namespace '${ns}'`)
+            await adapter.nsResolver.refresh()
           }
         },
 
@@ -230,11 +216,12 @@ export function documentDBAdapter(config: DocumentDBAdapterConfig): DatabaseAdap
         },
 
         // -- CRUD: Create --
+        // Payload passes `collection` (string slug), we map to `type`
 
         create: async (args: CreateArgs) => {
           const result = await adapter.create({
             ns,
-            collection: args.collection,
+            type: args.collection,
             data: sanitizeData(args.data as Record<string, unknown>),
           })
           const doc = typeof result.doc === 'object' && result.doc !== null
@@ -252,7 +239,7 @@ export function documentDBAdapter(config: DocumentDBAdapterConfig): DatabaseAdap
 
           const result = await adapter.find({
             ns,
-            collection: args.collection,
+            type: args.collection,
             where: convertWhere(args.where),
             sort: normalizeSort(args.sort),
             limit: limit === 0 ? undefined : limit,
@@ -266,7 +253,7 @@ export function documentDBAdapter(config: DocumentDBAdapterConfig): DatabaseAdap
         findOne: async <T extends { id: string | number }>(args: FindOneArgs): Promise<T | null> => {
           const result = await adapter.findOne({
             ns,
-            collection: args.collection,
+            type: args.collection,
             where: convertWhere(args.where),
           })
 
@@ -284,7 +271,7 @@ export function documentDBAdapter(config: DocumentDBAdapterConfig): DatabaseAdap
           } else if ('where' in args && args.where) {
             const found = await adapter.findOne({
               ns,
-              collection: args.collection,
+              type: args.collection,
               where: convertWhere(args.where) as InternalWhere,
             })
             if (!found) return { id: '' } as Record<string, unknown>
@@ -295,7 +282,7 @@ export function documentDBAdapter(config: DocumentDBAdapterConfig): DatabaseAdap
 
           const result = await adapter.updateOne({
             ns,
-            collection: args.collection,
+            type: args.collection,
             id: docId,
             data: sanitizeData(args.data as Record<string, unknown>),
           })
@@ -309,7 +296,7 @@ export function documentDBAdapter(config: DocumentDBAdapterConfig): DatabaseAdap
         updateMany: async (args: UpdateManyArgs) => {
           const found = await adapter.find({
             ns,
-            collection: args.collection,
+            type: args.collection,
             where: convertWhere(args.where),
           })
 
@@ -317,7 +304,7 @@ export function documentDBAdapter(config: DocumentDBAdapterConfig): DatabaseAdap
           for (const doc of found.docs) {
             const result = await adapter.updateOne({
               ns,
-              collection: args.collection,
+              type: args.collection,
               id: doc.id,
               data: args.data,
             })
@@ -334,7 +321,7 @@ export function documentDBAdapter(config: DocumentDBAdapterConfig): DatabaseAdap
         deleteOne: async (args: DeleteOneArgs) => {
           const found = await adapter.findOne({
             ns,
-            collection: args.collection,
+            type: args.collection,
             where: convertWhere(args.where),
           })
 
@@ -342,8 +329,8 @@ export function documentDBAdapter(config: DocumentDBAdapterConfig): DatabaseAdap
 
           await adapter.deleteMany({
             ns,
-            collection: args.collection,
-            where: { id: { equals: fromSqid(found.id).id } },
+            type: args.collection,
+            where: { seq: { equals: fromSqid(found.id).seq } },
           })
 
           return toPayloadDoc(found)
@@ -352,7 +339,7 @@ export function documentDBAdapter(config: DocumentDBAdapterConfig): DatabaseAdap
         deleteMany: async (args: DeleteManyArgs) => {
           await adapter.deleteMany({
             ns,
-            collection: args.collection,
+            type: args.collection,
             where: convertWhere(args.where) as InternalWhere,
           })
         },
@@ -362,7 +349,7 @@ export function documentDBAdapter(config: DocumentDBAdapterConfig): DatabaseAdap
         count: async (args: CountArgs) => {
           const result = await adapter.find({
             ns,
-            collection: args.collection,
+            type: args.collection,
             where: convertWhere(args.where),
             limit: 0,
           })
@@ -374,14 +361,14 @@ export function documentDBAdapter(config: DocumentDBAdapterConfig): DatabaseAdap
         upsert: async (args: UpsertArgs) => {
           const existing = await adapter.findOne({
             ns,
-            collection: args.collection,
+            type: args.collection,
             where: convertWhere(args.where),
           })
 
           if (existing) {
             const result = await adapter.updateOne({
               ns,
-              collection: args.collection,
+              type: args.collection,
               id: existing.id,
               data: args.data,
             })
@@ -393,7 +380,7 @@ export function documentDBAdapter(config: DocumentDBAdapterConfig): DatabaseAdap
 
           const result = await adapter.create({
             ns,
-            collection: args.collection,
+            type: args.collection,
             data: args.data,
           })
           const doc = typeof result.doc === 'object' && result.doc !== null
@@ -420,7 +407,7 @@ export function documentDBAdapter(config: DocumentDBAdapterConfig): DatabaseAdap
 
           const result = await adapter.find({
             ns,
-            collection: args.collection,
+            type: args.collection,
             where: draftWhere,
             sort: normalizeSort(args.sort),
             limit,
@@ -436,7 +423,7 @@ export function documentDBAdapter(config: DocumentDBAdapterConfig): DatabaseAdap
         createGlobal: async <T extends Record<string, unknown>>(args: CreateGlobalArgs<T>): Promise<T> => {
           const result = await adapter.create({
             ns,
-            collection: '_globals',
+            type: '_globals',
             data: { ...args.data, _globalSlug: args.slug },
           })
           const doc = typeof result.doc === 'object' && result.doc !== null
@@ -448,7 +435,7 @@ export function documentDBAdapter(config: DocumentDBAdapterConfig): DatabaseAdap
         findGlobal: async <T extends Record<string, unknown>>(args: FindGlobalArgs): Promise<T> => {
           const result = await adapter.findOne({
             ns,
-            collection: '_globals',
+            type: '_globals',
             where: { _globalSlug: { equals: args.slug } },
           })
           if (!result) return {} as unknown as T
@@ -458,14 +445,14 @@ export function documentDBAdapter(config: DocumentDBAdapterConfig): DatabaseAdap
         updateGlobal: async <T extends Record<string, unknown>>(args: UpdateGlobalArgs<T>): Promise<T> => {
           const existing = await adapter.findOne({
             ns,
-            collection: '_globals',
+            type: '_globals',
             where: { _globalSlug: { equals: args.slug } },
           })
 
           if (existing) {
             const result = await adapter.updateOne({
               ns,
-              collection: '_globals',
+              type: '_globals',
               id: existing.id,
               data: { ...args.data, _globalSlug: args.slug },
             })
@@ -478,7 +465,7 @@ export function documentDBAdapter(config: DocumentDBAdapterConfig): DatabaseAdap
           // If not found, create it
           const result = await adapter.create({
             ns,
-            collection: '_globals',
+            type: '_globals',
             data: { ...args.data, _globalSlug: args.slug },
           })
           const doc = typeof result.doc === 'object' && result.doc !== null
@@ -505,7 +492,7 @@ export function documentDBAdapter(config: DocumentDBAdapterConfig): DatabaseAdap
           // Mark previous versions as not latest
           const prevVersions = await adapter.find({
             ns,
-            collection: `_versions_${args.collectionSlug}`,
+            type: `_versions_${args.collectionSlug}`,
             where: {
               parent: { equals: String(args.parent) },
               latest: { equals: true },
@@ -514,7 +501,7 @@ export function documentDBAdapter(config: DocumentDBAdapterConfig): DatabaseAdap
           for (const prev of prevVersions.docs) {
             await adapter.updateOne({
               ns,
-              collection: `_versions_${args.collectionSlug}`,
+              type: `_versions_${args.collectionSlug}`,
               id: prev.id,
               data: { latest: false },
             })
@@ -522,7 +509,7 @@ export function documentDBAdapter(config: DocumentDBAdapterConfig): DatabaseAdap
 
           const result = await adapter.create({
             ns,
-            collection: `_versions_${args.collectionSlug}`,
+            type: `_versions_${args.collectionSlug}`,
             data: versionDoc,
           })
 
@@ -545,7 +532,7 @@ export function documentDBAdapter(config: DocumentDBAdapterConfig): DatabaseAdap
 
           const result = await adapter.find({
             ns,
-            collection: `_versions_${args.collection}`,
+            type: `_versions_${args.collection}`,
             where: convertWhere(args.where),
             sort: normalizeSort(args.sort),
             limit,
@@ -574,7 +561,7 @@ export function documentDBAdapter(config: DocumentDBAdapterConfig): DatabaseAdap
           } else if ('where' in args && args.where) {
             const found = await adapter.findOne({
               ns,
-              collection: `_versions_${args.collection}`,
+              type: `_versions_${args.collection}`,
               where: convertWhere(args.where) as InternalWhere,
             })
             if (found) docId = found.id
@@ -600,7 +587,7 @@ export function documentDBAdapter(config: DocumentDBAdapterConfig): DatabaseAdap
 
           const result = await adapter.updateOne({
             ns,
-            collection: `_versions_${args.collection}`,
+            type: `_versions_${args.collection}`,
             id: docId,
             data: updateData,
           })
@@ -620,7 +607,7 @@ export function documentDBAdapter(config: DocumentDBAdapterConfig): DatabaseAdap
         },
 
         deleteVersions: async (args: DeleteVersionsArgs) => {
-          const collection = args.collection
+          const type = args.collection
             ? `_versions_${args.collection}`
             : args.globalSlug
               ? `_versions__globals_${args.globalSlug}`
@@ -628,7 +615,7 @@ export function documentDBAdapter(config: DocumentDBAdapterConfig): DatabaseAdap
 
           await adapter.deleteMany({
             ns,
-            collection,
+            type,
             where: convertWhere(args.where) as InternalWhere,
           })
         },
@@ -636,7 +623,7 @@ export function documentDBAdapter(config: DocumentDBAdapterConfig): DatabaseAdap
         countVersions: async (args: CountArgs) => {
           const result = await adapter.find({
             ns,
-            collection: `_versions_${args.collection}`,
+            type: `_versions_${args.collection}`,
             where: convertWhere(args.where),
             limit: 0,
           })
@@ -660,13 +647,13 @@ export function documentDBAdapter(config: DocumentDBAdapterConfig): DatabaseAdap
           // Mark previous global versions as not latest
           const prevVersions = await adapter.find({
             ns,
-            collection: `_versions__globals_${args.globalSlug}`,
+            type: `_versions__globals_${args.globalSlug}`,
             where: { latest: { equals: true } },
           })
           for (const prev of prevVersions.docs) {
             await adapter.updateOne({
               ns,
-              collection: `_versions__globals_${args.globalSlug}`,
+              type: `_versions__globals_${args.globalSlug}`,
               id: prev.id,
               data: { latest: false },
             })
@@ -674,7 +661,7 @@ export function documentDBAdapter(config: DocumentDBAdapterConfig): DatabaseAdap
 
           const result = await adapter.create({
             ns,
-            collection: `_versions__globals_${args.globalSlug}`,
+            type: `_versions__globals_${args.globalSlug}`,
             data: versionDoc,
           })
 
@@ -696,7 +683,7 @@ export function documentDBAdapter(config: DocumentDBAdapterConfig): DatabaseAdap
 
           const result = await adapter.find({
             ns,
-            collection: `_versions__globals_${args.global}`,
+            type: `_versions__globals_${args.global}`,
             where: convertWhere(args.where),
             sort: normalizeSort(args.sort),
             limit,
@@ -724,7 +711,7 @@ export function documentDBAdapter(config: DocumentDBAdapterConfig): DatabaseAdap
           } else if ('where' in args && args.where) {
             const found = await adapter.findOne({
               ns,
-              collection: `_versions__globals_${args.global}`,
+              type: `_versions__globals_${args.global}`,
               where: convertWhere(args.where) as InternalWhere,
             })
             if (found) docId = found.id
@@ -749,7 +736,7 @@ export function documentDBAdapter(config: DocumentDBAdapterConfig): DatabaseAdap
 
           const result = await adapter.updateOne({
             ns,
-            collection: `_versions__globals_${args.global}`,
+            type: `_versions__globals_${args.global}`,
             id: docId,
             data: updateData,
           })
@@ -771,7 +758,7 @@ export function documentDBAdapter(config: DocumentDBAdapterConfig): DatabaseAdap
         countGlobalVersions: async (args: CountGlobalVersionArgs) => {
           const result = await adapter.find({
             ns,
-            collection: `_versions__globals_${args.global}`,
+            type: `_versions__globals_${args.global}`,
             where: convertWhere(args.where),
             limit: 0,
           })
@@ -785,9 +772,9 @@ export function documentDBAdapter(config: DocumentDBAdapterConfig): DatabaseAdap
           const limit = args.limit ?? 10
           const offset = (page - 1) * limit
 
-          // Use raw SQL to get distinct values for a field from the doc JSONB
+          // Use raw SQL to get distinct values for a field from the data JSONB
           const field = args.field
-          const conditions = ['ns = $1', 'collection = $2']
+          const conditions = ['ns = $1', 'type = $2']
           const params: unknown[] = [ns, args.collection]
           let paramIdx = 3
 
@@ -798,7 +785,7 @@ export function documentDBAdapter(config: DocumentDBAdapterConfig): DatabaseAdap
 
           params.push(limit, offset)
           const sql = `
-            SELECT DISTINCT doc->>'${field}' AS value, count(*) OVER() AS total
+            SELECT DISTINCT data->>'${field}' AS value, count(*) OVER() AS total
             FROM data
             WHERE ${conditions.join(' AND ')}
             ORDER BY value
@@ -835,7 +822,7 @@ export function documentDBAdapter(config: DocumentDBAdapterConfig): DatabaseAdap
           if ('id' in args && args.id != null) {
             const result = await adapter.updateOne({
               ns,
-              collection: 'payload-jobs',
+              type: 'payload-jobs',
               id: String(args.id),
               data: args.data,
             })
@@ -848,7 +835,7 @@ export function documentDBAdapter(config: DocumentDBAdapterConfig): DatabaseAdap
           if ('where' in args && args.where) {
             const found = await adapter.find({
               ns,
-              collection: 'payload-jobs',
+              type: 'payload-jobs',
               where: convertWhere(args.where),
               limit: args.limit,
             })
@@ -857,7 +844,7 @@ export function documentDBAdapter(config: DocumentDBAdapterConfig): DatabaseAdap
             for (const d of found.docs) {
               const result = await adapter.updateOne({
                 ns,
-                collection: 'payload-jobs',
+                type: 'payload-jobs',
                 id: d.id,
                 data: args.data,
               })

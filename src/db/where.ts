@@ -1,7 +1,7 @@
 import type { Where, WhereField } from '../types.js'
 
 const PROMOTED_COLUMNS = new Set([
-  'id', 'ns', 'collection', 'slug', 'status', 'locale', 'created', 'updated',
+  'seq', 'id', 'ns', 'type', 'name', 'slug', 'url', 'status', 'locale', 'created', 'updated',
 ])
 
 interface WhereResult {
@@ -25,7 +25,7 @@ export function whereToSQL(
   function compileField(field: string, op: WhereField): string {
     const col = PROMOTED_COLUMNS.has(field)
       ? `${table}."${field}"`
-      : `${table}.doc->>'${field}'`
+      : `${table}.data->>'${field}'`
 
     const clauses: string[] = []
 
@@ -52,7 +52,6 @@ export function whereToSQL(
       }
     }
     if (op.like !== undefined) {
-      // Payload's `like` means case-insensitive partial match (same as Drizzle adapter)
       const likeVal = String(op.like)
       clauses.push(`${col} ILIKE ${nextParam(likeVal.includes('%') ? likeVal : `%${likeVal}%`)}`)
     }
@@ -78,8 +77,8 @@ export function whereToSQL(
         const escapedField = field.replace(/'/g, "''")
         clauses.push(
           op.exists
-            ? `${table}.doc ? '${escapedField}'`
-            : `NOT (${table}.doc ? '${escapedField}')`,
+            ? `${table}.data ? '${escapedField}'`
+            : `NOT (${table}.data ? '${escapedField}')`,
         )
       }
     }

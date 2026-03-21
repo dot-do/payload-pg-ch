@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest'
-import { getTestPool, setupTestSchema, cleanupTestData, teardownTestPool } from './setup.js'
+import { getTestPool, setupTestSchema, cleanupTestData, createTestNs, teardownTestPool } from './setup.js'
 import { DocumentAdapter } from '../src/adapter.js'
 import { query } from '../src/db/pg.js'
 import type pg from 'pg'
@@ -8,12 +8,12 @@ const TEST_DB = process.env.TEST_DATABASE_URL ?? 'postgresql://postgres:test@loc
 
 let adapter: DocumentAdapter
 let pool: pg.Pool
-let nsId: number
+let ns: string
 
 beforeAll(async () => {
   pool = getTestPool() as unknown as pg.Pool
   await setupTestSchema()
-  adapter = new DocumentAdapter({ postgres: TEST_DB }, [
+  adapter = new DocumentAdapter({ postgres: TEST_DB, ns: 'findone.test' }, [
     {
       slug: 'posts',
       prefix: 'pos',
@@ -32,27 +32,23 @@ afterAll(async () => {
 
 beforeEach(async () => {
   await cleanupTestData()
-  const result = await query<{ id: number }>(
-    pool,
-    `INSERT INTO ns (uri, name, kind) VALUES ('findone.test', 'Test', 'production') RETURNING id`,
-  )
-  nsId = result.rows[0].id
+  ns = await createTestNs('findone.test', 'Test')
   await adapter.nsResolver.refresh()
 })
 
 describe('findOne variations', () => {
   it('findOne by id', async () => {
-    const created = await adapter.create({ ns: nsId, collection: 'posts', data: { title: 'By ID' } })
-    const found = await adapter.findOne({ ns: nsId, collection: 'posts', id: created.id })
+    const created = await adapter.create({ ns, type: 'posts', data: { title: 'By ID' } })
+    const found = await adapter.findOne({ ns, type: 'posts', id: created.id })
     expect(found).not.toBeNull()
     expect(found!.title).toBe('By ID')
   })
 
   it('findOne by where clause', async () => {
-    await adapter.create({ ns: nsId, collection: 'posts', data: { title: 'By Where', slug: 'by-where' } })
+    await adapter.create({ ns, type: 'posts', data: { title: 'By Where', slug: 'by-where' } })
     const found = await adapter.findOne({
-      ns: nsId,
-      collection: 'posts',
+      ns,
+      type: 'posts',
       where: { slug: { equals: 'by-where' } },
     })
     expect(found).not.toBeNull()
@@ -61,43 +57,42 @@ describe('findOne variations', () => {
 
   it('findOne throws for invalid sqid', async () => {
     await expect(
-      adapter.findOne({ ns: nsId, collection: 'posts', id: 'pos_AAAAAAAAAA' }),
+      adapter.findOne({ ns, type: 'posts', id: 'pos_AAAAAAAAAA' }),
     ).rejects.toThrow('Invalid sqid')
   })
 
   it('findOne returns null when not found by where', async () => {
     const found = await adapter.findOne({
-      ns: nsId,
-      collection: 'posts',
+      ns,
+      type: 'posts',
       where: { title: { equals: 'Does Not Exist' } },
     })
     expect(found).toBeNull()
   })
 
   it('findOne by where returns first match only', async () => {
-    await adapter.create({ ns: nsId, collection: 'posts', data: { title: 'A', status: 'published' } })
-    await adapter.create({ ns: nsId, collection: 'posts', data: { title: 'B', status: 'published' } })
+    await adapter.create({ ns, type: 'posts', data: { title: 'A', status: 'published' } })
+    await adapter.create({ ns, type: 'posts', data: { title: 'B', status: 'published' } })
 
     const found = await adapter.findOne({
-      ns: nsId,
-      collection: 'posts',
+      ns,
+      type: 'posts',
       where: { status: { equals: 'published' } },
     })
     expect(found).not.toBeNull()
-    // Should be one of the two
     expect(['A', 'B']).toContain(found!.title)
   })
 })
 
 describe('find with sort', () => {
   it('sorts by created ASC', async () => {
-    await adapter.create({ ns: nsId, collection: 'posts', data: { title: 'First' } })
-    await adapter.create({ ns: nsId, collection: 'posts', data: { title: 'Second' } })
-    await adapter.create({ ns: nsId, collection: 'posts', data: { title: 'Third' } })
+    await adapter.create({ ns, type: 'posts', data: { title: 'First' } })
+    await adapter.create({ ns, type: 'posts', data: { title: 'Second' } })
+    await adapter.create({ ns, type: 'posts', data: { title: 'Third' } })
 
     const result = await adapter.find({
-      ns: nsId,
-      collection: 'posts',
+      ns,
+      type: 'posts',
       sort: 'created ASC',
     })
 
@@ -106,10 +101,10 @@ describe('find with sort', () => {
   })
 
   it('sorts by created DESC (default)', async () => {
-    await adapter.create({ ns: nsId, collection: 'posts', data: { title: 'First' } })
-    await adapter.create({ ns: nsId, collection: 'posts', data: { title: 'Last' } })
+    await adapter.create({ ns, type: 'posts', data: { title: 'First' } })
+    await adapter.create({ ns, type: 'posts', data: { title: 'Last' } })
 
-    const result = await adapter.find({ ns: nsId, collection: 'posts' })
+    const result = await adapter.find({ ns, type: 'posts' })
     expect(result.docs[0].title).toBe('Last')
   })
 })
@@ -117,14 +112,14 @@ describe('find with sort', () => {
 describe('update edge cases', () => {
   it('update preserves fields not in the update payload', async () => {
     const created = await adapter.create({
-      ns: nsId,
-      collection: 'posts',
+      ns,
+      type: 'posts',
       data: { title: 'Original', slug: 'original', custom: 'preserved' },
     })
 
     const updated = await adapter.updateOne({
-      ns: nsId,
-      collection: 'posts',
+      ns,
+      type: 'posts',
       id: created.id,
       data: { title: 'Updated' },
     })
@@ -137,14 +132,14 @@ describe('update edge cases', () => {
 
   it('update can set field to null', async () => {
     const created = await adapter.create({
-      ns: nsId,
-      collection: 'posts',
+      ns,
+      type: 'posts',
       data: { title: 'Has Value' },
     })
 
     const updated = await adapter.updateOne({
-      ns: nsId,
-      collection: 'posts',
+      ns,
+      type: 'posts',
       id: created.id,
       data: { title: null },
     })
@@ -154,14 +149,13 @@ describe('update edge cases', () => {
   })
 
   it('update non-existent document throws', async () => {
-    // Create a valid sqid that decodes but doesn't exist in DB
-    const created = await adapter.create({ ns: nsId, collection: 'posts', data: { title: 'Temp' } })
-    await adapter.deleteMany({ ns: nsId, collection: 'posts', where: { title: { equals: 'Temp' } } })
+    const created = await adapter.create({ ns, type: 'posts', data: { title: 'Temp' } })
+    await adapter.deleteMany({ ns, type: 'posts', where: { title: { equals: 'Temp' } } })
 
     await expect(
       adapter.updateOne({
-        ns: nsId,
-        collection: 'posts',
+        ns,
+        type: 'posts',
         id: created.id,
         data: { title: 'X' },
       }),
@@ -171,34 +165,34 @@ describe('update edge cases', () => {
 
 describe('deleteMany edge cases', () => {
   it('deleteMany with no matches is a no-op', async () => {
-    await adapter.create({ ns: nsId, collection: 'posts', data: { title: 'Keep' } })
+    await adapter.create({ ns, type: 'posts', data: { title: 'Keep' } })
 
     const result = await adapter.deleteMany({
-      ns: nsId,
-      collection: 'posts',
+      ns,
+      type: 'posts',
       where: { title: { equals: 'Does Not Exist' } },
     })
 
     expect(result.deleted).toBe(0)
 
-    const posts = await adapter.find({ ns: nsId, collection: 'posts' })
+    const posts = await adapter.find({ ns, type: 'posts' })
     expect(posts.total).toBe(1)
   })
 
   it('deleteMany removes multiple docs', async () => {
-    await adapter.create({ ns: nsId, collection: 'posts', data: { title: 'A', status: 'draft' } })
-    await adapter.create({ ns: nsId, collection: 'posts', data: { title: 'B', status: 'draft' } })
-    await adapter.create({ ns: nsId, collection: 'posts', data: { title: 'C', status: 'published' } })
+    await adapter.create({ ns, type: 'posts', data: { title: 'A', status: 'draft' } })
+    await adapter.create({ ns, type: 'posts', data: { title: 'B', status: 'draft' } })
+    await adapter.create({ ns, type: 'posts', data: { title: 'C', status: 'published' } })
 
     const result = await adapter.deleteMany({
-      ns: nsId,
-      collection: 'posts',
+      ns,
+      type: 'posts',
       where: { status: { equals: 'draft' } },
     })
 
     expect(result.deleted).toBe(2)
 
-    const posts = await adapter.find({ ns: nsId, collection: 'posts' })
+    const posts = await adapter.find({ ns, type: 'posts' })
     expect(posts.total).toBe(1)
     expect(posts.docs[0].title).toBe('C')
   })

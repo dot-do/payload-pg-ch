@@ -1,28 +1,28 @@
 import { describe, it, expect } from 'vitest'
-import { toSqid, fromSqid, registerPrefix, getPrefix, generateRand } from './sqids.js'
+import { toSqid, fromSqid, registerPrefix, getPrefix, generateRand, hashNs } from './sqids.js'
 
 describe('sqids', () => {
   it('round-trips encode/decode', () => {
     const rand = 42317
     const created = new Date('2024-03-19T12:00:00Z')
-    const sqid = toSqid('posts', 48291, 7, created, rand)
+    const sqid = toSqid('posts', 48291, 'acme.com', created, rand)
 
     expect(sqid).toMatch(/^pos_/)
     expect(sqid.length).toBeGreaterThan(14) // prefix + _ + minLength 10
 
     const decoded = fromSqid(sqid)
     expect(decoded.prefix).toBe('pos')
-    expect(decoded.ns).toBe(7)
-    expect(decoded.id).toBe(48291)
+    expect(decoded.nsHash).toBe(hashNs('acme.com'))
+    expect(decoded.seq).toBe(48291)
     expect(decoded.epoch).toBe(Math.floor(created.getTime() / 1000))
     expect(decoded.rand).toBe(rand)
   })
 
-  it('derives prefix from collection slug', () => {
+  it('derives prefix from type slug', () => {
     expect(getPrefix('posts')).toBe('pos')
     expect(getPrefix('users')).toBe('usr')
     expect(getPrefix('media')).toBe('med')
-    // Unknown collection falls back to first 3 chars
+    // Unknown type falls back to first 3 chars
     expect(getPrefix('newsletters')).toBe('new')
   })
 
@@ -31,18 +31,18 @@ describe('sqids', () => {
     expect(getPrefix('newsletters')).toBe('nws')
   })
 
-  it('different ns values produce different sqids for same id', () => {
+  it('different ns values produce different sqids for same seq', () => {
     const created = new Date('2024-01-01T00:00:00Z')
     const rand = 100
-    const sqid1 = toSqid('posts', 1, 7, created, rand)
-    const sqid2 = toSqid('posts', 1, 12, created, rand)
+    const sqid1 = toSqid('posts', 1, 'acme.com', created, rand)
+    const sqid2 = toSqid('posts', 1, 'beta.com', created, rand)
     expect(sqid1).not.toBe(sqid2)
   })
 
   it('rand makes sequential IDs non-guessable', () => {
     const created = new Date('2024-01-01T00:00:00Z')
-    const sqid1 = toSqid('posts', 1, 7, created, 111)
-    const sqid2 = toSqid('posts', 2, 7, created, 222)
+    const sqid1 = toSqid('posts', 1, 'acme.com', created, 111)
+    const sqid2 = toSqid('posts', 2, 'acme.com', created, 222)
     // The encoded parts should differ significantly
     const encoded1 = sqid1.split('_')[1]
     const encoded2 = sqid2.split('_')[1]
@@ -67,8 +67,14 @@ describe('sqids', () => {
 
   it('sqid is deterministic for same inputs', () => {
     const created = new Date('2024-06-15T08:30:00Z')
-    const a = toSqid('pages', 999, 3, created, 54321)
-    const b = toSqid('pages', 999, 3, created, 54321)
+    const a = toSqid('pages', 999, 'test.com', created, 54321)
+    const b = toSqid('pages', 999, 'test.com', created, 54321)
     expect(a).toBe(b)
+  })
+
+  it('hashNs produces consistent non-negative integers', () => {
+    expect(hashNs('acme.com')).toBe(hashNs('acme.com'))
+    expect(hashNs('acme.com')).not.toBe(hashNs('beta.com'))
+    expect(hashNs('acme.com')).toBeGreaterThanOrEqual(0)
   })
 })

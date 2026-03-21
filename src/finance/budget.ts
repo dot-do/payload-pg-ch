@@ -10,16 +10,16 @@ export interface BudgetCheckResult {
 
 export async function checkBudget(
   pool: PgPool,
-  nsId: number,
+  ns: number | string,
   limit: number,
   warningThreshold: number = 80,
 ): Promise<BudgetCheckResult> {
   const result = await query<{ total: string }>(
     pool,
-    `SELECT COALESCE(SUM((doc->>'amount')::numeric), 0) AS total
+    `SELECT COALESCE(SUM((data->>'amount')::numeric), 0) AS total
      FROM data
-     WHERE ns = $1 AND collection = 'cost-events'`,
-    [nsId],
+     WHERE ns = $1 AND type = 'cost-events'`,
+    [ns],
   )
 
   const totalSpent = parseFloat(result.rows[0].total)

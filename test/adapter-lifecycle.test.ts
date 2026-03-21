@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest'
-import { getTestPool, setupTestSchema, cleanupTestData, teardownTestPool } from './setup.js'
+import { getTestPool, setupTestSchema, cleanupTestData, createTestNs, teardownTestPool } from './setup.js'
 import { DocumentAdapter } from '../src/adapter.js'
 import { fromSqid } from '../src/id/sqids.js'
 import { query } from '../src/db/pg.js'
@@ -24,11 +24,10 @@ beforeEach(async () => {
 
 describe('adapter init/destroy lifecycle', () => {
   it('init starts ns resolver, destroy stops it', async () => {
-    const adapter = new DocumentAdapter({ postgres: TEST_DB })
+    const adapter = new DocumentAdapter({ postgres: TEST_DB, ns: 'lifecycle.test' })
     await adapter.init()
 
-    // Should be able to resolve after init
-    await query(pool, `INSERT INTO ns (uri, name, kind) VALUES ('lifecycle.test', 'Test', 'production')`)
+    await createTestNs('lifecycle.test', 'Test')
     await adapter.nsResolver.refresh()
     const ns = adapter.nsResolver.resolve('lifecycle.test')
     expect(ns).not.toBeNull()
@@ -38,7 +37,7 @@ describe('adapter init/destroy lifecycle', () => {
 
   it('multiple init/destroy cycles work', async () => {
     for (let i = 0; i < 3; i++) {
-      const adapter = new DocumentAdapter({ postgres: TEST_DB })
+      const adapter = new DocumentAdapter({ postgres: TEST_DB, ns: 'lifecycle.test' })
       await adapter.init()
       await adapter.destroy()
     }
@@ -47,13 +46,9 @@ describe('adapter init/destroy lifecycle', () => {
 
 describe('merge preserves relationships', () => {
   it('rels from branch are copied to parent on merge', async () => {
-    const nsResult = await query<{ id: number }>(
-      pool,
-      `INSERT INTO ns (uri, name, kind) VALUES ('merge-rels.test', 'Test', 'production') RETURNING id`,
-    )
-    const nsId = nsResult.rows[0].id
+    const ns = await createTestNs('merge-rels.test', 'Test')
 
-    const adapter = new DocumentAdapter({ postgres: TEST_DB }, [
+    const adapter = new DocumentAdapter({ postgres: TEST_DB, ns: 'merge-rels.test' }, [
       {
         slug: 'posts',
         prefix: 'pos',
@@ -66,53 +61,48 @@ describe('merge preserves relationships', () => {
     ])
     await adapter.nsResolver.refresh()
 
-    // Create user and post in parent
-    const user1 = await adapter.create({ ns: nsId, collection: 'users', data: { name: 'Alice' } })
-    const user2 = await adapter.create({ ns: nsId, collection: 'users', data: { name: 'Bob' } })
-    const user1Id = fromSqid(user1.id).id
-    const user2Id = fromSqid(user2.id).id
+    const user1 = await adapter.create({ ns, type: 'users', data: { name: 'Alice' } })
+    const user2 = await adapter.create({ ns, type: 'users', data: { name: 'Bob' } })
+    const user1Seq = fromSqid(user1.id).seq
+    const user2Seq = fromSqid(user2.id).seq
 
     const post = await adapter.create({
-      ns: nsId,
-      collection: 'posts',
-      data: { title: 'Post', author: user1Id },
+      ns,
+      type: 'posts',
+      data: { title: 'Post', author: user1Seq },
     })
-    const postId = fromSqid(post.id).id
+    const postSeq = fromSqid(post.id).seq
 
-    // Verify initial rel
     const relsBefore = await query<{ to: number }>(
       pool,
       `SELECT "to" FROM rels WHERE ns = $1 AND "from" = $2 AND path = 'author'`,
-      [nsId, postId],
+      [ns, postSeq],
     )
-    expect(relsBefore.rows[0].to).toBe(user1Id)
+    expect(relsBefore.rows[0].to).toBe(user1Seq)
 
-    // Create branch, change author to Bob
     const branch = await adapter.createBranch({
-      parent: nsId,
-      uri: 'merge-rels.test/pr/1',
+      parentNs: ns,
+      ns: 'merge-rels.test/pr/1',
       branch: 'feat/change-author',
     })
     await adapter.nsResolver.refresh()
 
     await adapter.updateOne({
-      ns: branch.id,
-      collection: 'posts',
+      ns: branch.ns,
+      type: 'posts',
       id: post.id,
-      data: { title: 'Post', author: user2Id },
+      data: { title: 'Post', author: user2Seq },
     })
 
-    // Merge
-    await adapter.mergeBranch(branch.id)
+    await adapter.mergeBranch(branch.ns)
 
-    // Parent rels should now point to user2
     const relsAfter = await query<{ to: number }>(
       pool,
       `SELECT "to" FROM rels WHERE ns = $1 AND "from" = $2 AND path = 'author'`,
-      [nsId, postId],
+      [ns, postSeq],
     )
     expect(relsAfter.rows).toHaveLength(1)
-    expect(relsAfter.rows[0].to).toBe(user2Id)
+    expect(relsAfter.rows[0].to).toBe(user2Seq)
 
     await adapter.destroy()
   })
@@ -120,15 +110,12 @@ describe('merge preserves relationships', () => {
 
 describe('adapter with custom prefix config', () => {
   it('uses custom prefixes from config', async () => {
-    const nsResult = await query<{ id: number }>(
-      pool,
-      `INSERT INTO ns (uri, name, kind) VALUES ('prefix.test', 'Test', 'production') RETURNING id`,
-    )
-    const nsId = nsResult.rows[0].id
+    const ns = await createTestNs('prefix.test', 'Test')
 
     const adapter = new DocumentAdapter(
       {
         postgres: TEST_DB,
+        ns: 'prefix.test',
         collections: {
           invoices: { prefix: 'inv' },
           receipts: { prefix: 'rcp' },
@@ -142,15 +129,15 @@ describe('adapter with custom prefix config', () => {
     await adapter.nsResolver.refresh()
 
     const invoice = await adapter.create({
-      ns: nsId,
-      collection: 'invoices',
+      ns,
+      type: 'invoices',
       data: { total: 9999 },
     })
     expect(invoice.id).toMatch(/^inv_/)
 
     const receipt = await adapter.create({
-      ns: nsId,
-      collection: 'receipts',
+      ns,
+      type: 'receipts',
       data: { amount: 5000 },
     })
     expect(receipt.id).toMatch(/^rcp_/)

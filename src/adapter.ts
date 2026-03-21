@@ -1,5 +1,5 @@
 import type {
-  Sqid, NsRow, DataRow, RelRow, ActionRow,
+  Sqid, DataRow, RelRow, ActionRow,
   Where, RequestMeta, CollectionTier, FieldSchema, AdapterConfig,
 } from './types.js'
 import { createPool, transaction, query, type PgPool } from './db/pg.js'
@@ -17,7 +17,7 @@ const COLLECTION_TIER: Record<string, CollectionTier> = {
   search: 'ch',
 }
 
-// Collections backed by the `actions` table instead of `data`
+// Types backed by the `actions` table instead of `data`
 const ACTIONS_COLLECTIONS = new Set(['agent-runs'])
 
 
@@ -31,11 +31,13 @@ interface CollectionDef {
 export class DocumentAdapter {
   pool: PgPool
   nsResolver: NsResolver
+  readonly defaultNs: string
   private collections: Map<string, CollectionDef> = new Map()
 
   constructor(config: AdapterConfig, collections: CollectionDef[] = []) {
     this.pool = createPool(config.postgres)
     this.nsResolver = new NsResolver(this.pool)
+    this.defaultNs = config.ns ?? 'localhost'
 
     // Register custom prefixes
     if (config.collections) {
@@ -58,16 +60,16 @@ export class DocumentAdapter {
     await this.pool.end()
   }
 
-  async loadDynamicCollections(ns: number): Promise<number> {
-    const result = await query<{ doc: Record<string, unknown> }>(
+  async loadDynamicCollections(ns: string): Promise<number> {
+    const result = await query<{ data: Record<string, unknown> }>(
       this.pool,
-      `SELECT doc FROM data WHERE ns = $1 AND collection = 'nouns' AND doc->>'schema' IS NOT NULL`,
+      `SELECT data FROM data WHERE ns = $1 AND type = 'nouns' AND data->>'schema' IS NOT NULL`,
       [ns],
     )
 
     let loaded = 0
     for (const row of result.rows) {
-      const doc = row.doc
+      const doc = row.data
       const slug = doc.slug as string
       const schema = doc.schema as { fields: Array<{ name: string; type: string; [k: string]: unknown }> }
       if (!slug || !schema?.fields) continue
@@ -91,56 +93,77 @@ export class DocumentAdapter {
     return loaded
   }
 
-  tier(collection: string): CollectionTier {
-    return COLLECTION_TIER[collection] ?? 'pg'
+  tier(type: string): CollectionTier {
+    return COLLECTION_TIER[type] ?? 'pg'
   }
 
-  private getFields(collection: string): FieldSchema[] {
-    return this.collections.get(collection)?.fields ?? []
+  private getFields(type: string): FieldSchema[] {
+    return this.collections.get(type)?.fields ?? []
   }
 
   private rowToSqid(row: DataRow): Sqid {
-    const ns = this.nsResolver.getById(row.ns)
-    const identity = ns?.githuborgid ?? row.ns
-    return toSqid(row.collection, row.id, identity, row.created, row.rand) as Sqid
+    return toSqid(row.type, row.seq, row.ns, row.created, row.rand) as Sqid
   }
 
   // --- CRUD ---
 
   async create(args: {
-    ns: number
-    collection: string
+    ns: string
+    type: string
     data: Record<string, unknown>
     actor?: number
     meta?: RequestMeta
   }): Promise<{ id: Sqid; doc: unknown }> {
-    // Route actions-backed collections to the actions table
-    if (ACTIONS_COLLECTIONS.has(args.collection)) {
+    // Route actions-backed types to the actions table
+    if (ACTIONS_COLLECTIONS.has(args.type)) {
       return this.createAction(args)
     }
 
     const rand = generateRand()
-    const fields = this.getFields(args.collection)
+    const fields = this.getFields(args.type)
     const { doc, meta } = splitMeta(args.data)
+
+    // Promote name from data
+    const name = (doc.name as string) ?? (doc.title as string) ?? null
 
     return transaction(this.pool, async (tx) => {
       const row = await insertData(tx, {
         ns: args.ns,
-        collection: args.collection,
-        slug: args.data.slug as string | undefined,
-        doc,
+        type: args.type,
+        id: `_tmp_${rand}`,
+        name,
+        slug: doc.slug as string | undefined,
+        url: buildUrl(args.ns, args.type, (doc.slug as string) ?? undefined),
+        data: doc,
+        mdx: doc.mdx as string | undefined,
+        code: doc.code as string | undefined,
         meta: Object.keys(meta).length > 0 ? meta : undefined,
-        status: args.data.status as string | undefined,
-        locale: args.data.locale as string | undefined,
+        status: doc.status as string | undefined,
+        locale: doc.locale as string | undefined,
         rand,
       })
 
+      // Now that we have the seq, generate the sqid and set it as the id
+      const sqid = toSqid(args.type, row.seq, args.ns, row.created, row.rand)
+
+      // Update the id column with the sqid if it was not pre-set
+      if (!row.id) {
+        await query(tx, `UPDATE data SET id = $1 WHERE seq = $2`, [sqid, row.seq])
+        row.id = sqid
+      }
+
+      // Also update url if it was built with a placeholder
+      if (!row.url) {
+        const url = buildUrl(args.ns, args.type, (doc.slug as string) ?? row.id)
+        await query(tx, `UPDATE data SET url = $1 WHERE seq = $2`, [url, row.seq])
+      }
+
       // Extract and insert relationships
-      const rels = extractRels(args.data, fields)
+      const rels = extractRels(doc as Record<string, unknown>, fields)
       for (const rel of rels) {
         await insertRel(tx, {
           ns: args.ns,
-          from: row.id,
+          from: row.seq,
           to: rel.to,
           path: rel.path,
           sort: rel.sort,
@@ -152,41 +175,47 @@ export class DocumentAdapter {
   }
 
   private async createAction(args: {
-    ns: number
-    collection: string
+    ns: string
+    type: string
     data: Record<string, unknown>
     actor?: number
     meta?: RequestMeta
   }): Promise<{ id: Sqid; doc: unknown }> {
+    const rand = generateRand()
     return transaction(this.pool, async (tx) => {
+      // Generate a temporary id, will be replaced with sqid
       const action = await enqueueAction(tx, {
         ns: args.ns,
-        kind: args.data.kind as string ?? args.collection,
+        id: '', // placeholder
+        type: args.data.type as string ?? args.type,
         name: args.data.name as string ?? '',
         input: args.data.input ?? args.data,
         entity: args.data.entity as number | undefined,
         scheduled: args.data.scheduled as Date | undefined,
+        rand,
       })
 
-      const nsRow = this.nsResolver.getById(args.ns)
-      const identity = nsRow?.githuborgid ?? args.ns
+      const sqid = toSqid(args.type, action.seq, args.ns, action.created, action.rand)
+      // Update the id column with the sqid
+      await query(tx, `UPDATE actions SET id = $1 WHERE seq = $2`, [sqid, action.seq])
+
       return {
-        id: toSqid(args.collection, action.id, identity, action.created, action.rand) as Sqid,
+        id: sqid as Sqid,
         doc: args.data,
       }
     })
   }
 
   private async findActions(args: {
-    ns: number
-    collection: string
+    ns: string
+    type: string
     where?: Where
     limit?: number
     offset?: number
   }): Promise<{ docs: Array<{ id: Sqid } & Record<string, unknown>>; total: number }> {
-    const kind = args.collection === 'agent-runs' ? 'agent-run' : args.collection
-    const conditions = ['ns = $1', 'kind = $2']
-    const params: unknown[] = [args.ns, kind]
+    const actionType = args.type === 'agent-runs' ? 'agent-run' : args.type
+    const conditions = ['ns = $1', 'type = $2']
+    const params: unknown[] = [args.ns, actionType]
     let paramIdx = 3
 
     // Support basic status filtering from where clause
@@ -208,14 +237,12 @@ export class DocumentAdapter {
       params,
     )
 
-    const nsRow = this.nsResolver.getById(args.ns)
-    const identity = nsRow?.githuborgid ?? args.ns
     const total = result.rows.length > 0 ? parseInt(result.rows[0].total, 10) : 0
 
     return {
       docs: result.rows.map(row => ({
-        id: toSqid(args.collection, row.id, identity, row.created, row.rand) as Sqid,
-        kind: row.kind,
+        id: toSqid(args.type, row.seq, args.ns, row.created, row.rand) as Sqid,
+        type: row.type,
         name: row.name,
         status: row.status,
         input: row.input,
@@ -228,19 +255,17 @@ export class DocumentAdapter {
   }
 
   private async findOneAction(args: {
-    ns: number
-    collection: string
+    ns: string
+    type: string
     id: string
   }): Promise<({ id: Sqid } & Record<string, unknown>) | null> {
-    const { id } = fromSqid(args.id)
-    const action = await findAction(this.pool, id, args.ns)
+    const { seq } = fromSqid(args.id)
+    const action = await findAction(this.pool, seq, args.ns)
     if (!action) return null
 
-    const nsRow = this.nsResolver.getById(args.ns)
-    const identity = nsRow?.githuborgid ?? args.ns
     return {
-      id: toSqid(args.collection, action.id, identity, action.created, action.rand) as Sqid,
-      kind: action.kind,
+      id: toSqid(args.type, action.seq, args.ns, action.created, action.rand) as Sqid,
+      type: action.type,
       name: action.name,
       status: action.status,
       input: action.input,
@@ -251,25 +276,26 @@ export class DocumentAdapter {
   }
 
   async find(args: {
-    ns: number
-    collection: string
+    ns: string
+    type: string
     where?: Where
     sort?: string
     limit?: number
     offset?: number
   }): Promise<{ docs: Array<{ id: Sqid } & Record<string, unknown>>; total: number }> {
-    // Route actions-backed collections
-    if (ACTIONS_COLLECTIONS.has(args.collection)) {
+    // Route actions-backed types
+    if (ACTIONS_COLLECTIONS.has(args.type)) {
       return this.findActions(args)
     }
 
-    const ns = this.nsResolver.getById(args.ns)
+    const nsDoc = this.nsResolver.getByNs(args.ns)
+    const parentNs = this.nsResolver.getParentNs(args.ns)
 
-    const result = ns?.parent
+    const result = parentNs
       ? await findDataCOW(this.pool, {
           ns: args.ns,
-          parent: ns.parent,
-          collection: args.collection,
+          parent: parentNs,
+          type: args.type,
           where: args.where,
           sort: args.sort,
           limit: args.limit,
@@ -277,23 +303,26 @@ export class DocumentAdapter {
         })
       : await findData(this.pool, {
           ns: args.ns,
-          collection: args.collection,
+          type: args.type,
           where: args.where,
           sort: args.sort,
           limit: args.limit,
           offset: args.offset,
         })
 
-    const fromIds = result.rows.map(row => row.id)
-    const relsMap = await batchFetchRelsWithTargets(this.pool, fromIds, args.ns)
+    const fromSeqs = result.rows.map(row => row.seq)
+    const relsMap = await batchFetchRelsWithTargets(this.pool, fromSeqs, args.ns)
+
+    // Suppress unused variable warning for nsDoc
+    void nsDoc
 
     const docs = result.rows.map((row) => {
-      const doc = typeof row.doc === 'string' ? JSON.parse(row.doc) : row.doc
-      const rels = relsMap.get(row.id) ?? []
+      const data = typeof row.data === 'string' ? JSON.parse(row.data) : row.data
+      const rels = relsMap.get(row.seq) ?? []
       return {
         id: this.rowToSqid(row),
-        ...(doc as Record<string, unknown>),
-        ...relsToDoc(rels, this.nsResolver),
+        ...(data as Record<string, unknown>),
+        ...relsToDoc(rels, args.ns),
       } as { id: Sqid } & Record<string, unknown>
     })
 
@@ -301,56 +330,56 @@ export class DocumentAdapter {
   }
 
   async findOne(args: {
-    ns: number
-    collection: string
+    ns: string
+    type: string
     where?: Where
     id?: string
   }): Promise<({ id: Sqid } & Record<string, unknown>) | null> {
-    // Route actions-backed collections to the actions table
-    if (ACTIONS_COLLECTIONS.has(args.collection) && args.id) {
-      return this.findOneAction(args as { ns: number; collection: string; id: string })
+    // Route actions-backed types to the actions table
+    if (ACTIONS_COLLECTIONS.has(args.type) && args.id) {
+      return this.findOneAction(args as { ns: string; type: string; id: string })
     }
 
-    const ns = this.nsResolver.getById(args.ns)
+    const parentNs = this.nsResolver.getParentNs(args.ns)
     let row: DataRow | null = null
 
     if (args.id) {
-      const { id } = fromSqid(args.id)
+      const { seq } = fromSqid(args.id)
       // Try the current namespace first
-      row = await findOneData(this.pool, { ns: args.ns, id })
-      // In a branch: if not found by parent id, check for forked doc or fall through to parent
-      if (!row && ns?.parent) {
+      row = await findOneData(this.pool, { ns: args.ns, seq })
+      // In a branch: if not found, check for forked doc or fall through to parent
+      if (!row && parentNs) {
         // Check if doc is tombstoned in this branch
         const tombstone = await query<{ hidden: number }>(
           this.pool,
-          `SELECT 1 AS hidden FROM data WHERE ns = $1 AND collection = '_tombstone' AND (meta->>'_parent')::bigint = $2`,
-          [args.ns, id],
+          `SELECT 1 AS hidden FROM data WHERE ns = $1 AND type = '_tombstone' AND (meta->>'_parent')::bigint = $2`,
+          [args.ns, seq],
         )
         if (tombstone.rows.length > 0) {
           // Doc was deleted in this branch — return null
           row = null
         } else {
-          // Look for a forked doc with _parent pointing to this id (stored in meta)
+          // Look for a forked doc with _parent pointing to this seq (stored in meta)
           const forked = await query<DataRow>(
             this.pool,
-            `SELECT * FROM data WHERE ns = $1 AND (meta->>'_parent')::bigint = $2 LIMIT 1`,
-            [args.ns, id],
+            `SELECT * FROM data WHERE ns = $1 AND type NOT IN ('namespaces', '_tombstone') AND (meta->>'_parent')::bigint = $2 LIMIT 1`,
+            [args.ns, seq],
           )
           if (forked.rows[0]) {
             row = forked.rows[0]
           } else {
             // Fall through to parent
-            row = await findOneData(this.pool, { ns: ns.parent, id })
+            row = await findOneData(this.pool, { ns: parentNs, seq })
           }
         }
       }
     } else if (args.where) {
       // Use COW path for where queries in branches
-      if (ns?.parent) {
+      if (parentNs) {
         const result = await findDataCOW(this.pool, {
           ns: args.ns,
-          parent: ns.parent,
-          collection: args.collection,
+          parent: parentNs,
+          type: args.type,
           where: args.where,
           limit: 1,
         })
@@ -358,7 +387,7 @@ export class DocumentAdapter {
       } else {
         const result = await findData(this.pool, {
           ns: args.ns,
-          collection: args.collection,
+          type: args.type,
           where: args.where,
           limit: 1,
         })
@@ -368,86 +397,95 @@ export class DocumentAdapter {
 
     if (!row) return null
 
-    const doc = typeof row.doc === 'string' ? JSON.parse(row.doc) : row.doc
-    const rels = await fetchRelsWithTargets(this.pool, row.id, args.ns)
+    const data = typeof row.data === 'string' ? JSON.parse(row.data) : row.data
+    const rels = await fetchRelsWithTargets(this.pool, row.seq, args.ns)
     return {
       id: this.rowToSqid(row),
-      ...(doc as Record<string, unknown>),
-      ...relsToDoc(rels, this.nsResolver),
+      ...(data as Record<string, unknown>),
+      ...relsToDoc(rels, args.ns),
     }
   }
 
   async updateOne(args: {
-    ns: number
-    collection: string
+    ns: string
+    type: string
     id: string
     data: Record<string, unknown>
     actor?: number
     meta?: RequestMeta
   }): Promise<{ id: Sqid; doc: unknown }> {
-    const { id: intId } = fromSqid(args.id)
-    const ns = this.nsResolver.getById(args.ns)
-    const fields = this.getFields(args.collection)
+    const { seq: intSeq } = fromSqid(args.id)
+    const parentNs = this.nsResolver.getParentNs(args.ns)
+    const fields = this.getFields(args.type)
 
     return transaction(this.pool, async (tx) => {
-      let workingId = intId
+      let workingSeq = intSeq
 
       // COW fork if in a branch
-      if (ns?.parent) {
-        let exists = await findOneData(tx, { ns: args.ns, id: intId })
+      if (parentNs) {
+        let exists = await findOneData(tx, { ns: args.ns, seq: intSeq })
         if (!exists) {
           // Check if we already forked this doc (forked doc has _parent in meta)
           const forkedResult = await query<DataRow>(
             tx,
-            `SELECT * FROM data WHERE ns = $1 AND (meta->>'_parent')::bigint = $2 LIMIT 1`,
-            [args.ns, intId],
+            `SELECT * FROM data WHERE ns = $1 AND type NOT IN ('namespaces', '_tombstone') AND (meta->>'_parent')::bigint = $2 LIMIT 1`,
+            [args.ns, intSeq],
           )
           if (forkedResult.rows[0]) {
             exists = forkedResult.rows[0]
-            workingId = exists.id
+            workingSeq = exists.seq
           }
         }
         if (!exists) {
-          const parentDoc = await findOneData(tx, { ns: ns.parent, id: intId })
+          const parentDoc = await findOneData(tx, { ns: parentNs, seq: intSeq })
           if (parentDoc) {
-            const parentDocObj = typeof parentDoc.doc === 'string' ? JSON.parse(parentDoc.doc) : parentDoc.doc
+            const parentData = typeof parentDoc.data === 'string' ? JSON.parse(parentDoc.data) : parentDoc.data
             const forkedRow = await insertData(tx, {
               ns: args.ns,
-              collection: parentDoc.collection,
+              type: parentDoc.type,
+              id: `${parentDoc.id}_fork_${args.ns}`,
+              name: parentDoc.name,
               slug: parentDoc.slug,
-              doc: parentDocObj,
-              meta: { _parent: parentDoc.id },
+              url: null, // Forked docs don't inherit parent URL (unique constraint)
+              data: parentData,
+              mdx: parentDoc.mdx,
+              code: parentDoc.code,
+              meta: { _parent: parentDoc.seq },
               status: parentDoc.status,
               locale: parentDoc.locale,
               rand: parentDoc.rand,
             })
-            workingId = forkedRow.id
+            workingSeq = forkedRow.seq
           }
         }
       }
 
       // Merge existing doc with updates
-      const current = await findOneData(tx, { ns: args.ns, id: workingId })
-      const currentDoc = current ? (typeof current.doc === 'string' ? JSON.parse(current.doc) : current.doc) : {}
-      const merged = { ...currentDoc, ...args.data }
+      const current = await findOneData(tx, { ns: args.ns, seq: workingSeq })
+      const currentData = current ? (typeof current.data === 'string' ? JSON.parse(current.data) : current.data) : {}
+      const merged = { ...currentData, ...args.data }
       const { doc: mergedDoc, meta: mergedMeta } = splitMeta(merged)
+
+      // Promote name from data
+      const name = (mergedDoc.name as string) ?? (mergedDoc.title as string) ?? current?.name ?? null
 
       const row = await updateData(tx, {
         ns: args.ns,
-        id: workingId,
-        doc: mergedDoc,
+        seq: workingSeq,
+        data: mergedDoc,
+        name,
         meta: Object.keys(mergedMeta).length > 0 ? mergedMeta : undefined,
         status: args.data.status as string | undefined,
         locale: args.data.locale as string | undefined,
       })
 
       // Rebuild relationships
-      await deleteRelsForEntity(tx, { ns: args.ns, from: workingId })
-      const rels = extractRels(mergedDoc, fields)
+      await deleteRelsForEntity(tx, { ns: args.ns, from: workingSeq })
+      const rels = extractRels(mergedDoc as Record<string, unknown>, fields)
       for (const rel of rels) {
         await insertRel(tx, {
           ns: args.ns,
-          from: workingId,
+          from: workingSeq,
           to: rel.to,
           path: rel.path,
           sort: rel.sort,
@@ -459,49 +497,50 @@ export class DocumentAdapter {
   }
 
   async deleteMany(args: {
-    ns: number
-    collection: string
+    ns: string
+    type: string
     where: Where
     actor?: number
     meta?: RequestMeta
   }): Promise<{ deleted: number }> {
-    const ns = this.nsResolver.getById(args.ns)
+    const parentNs = this.nsResolver.getParentNs(args.ns)
 
     return transaction(this.pool, async (tx) => {
       // Use COW read path if in a branch, so we see parent docs too
-      const result = ns?.parent
+      const result = parentNs
         ? await findDataCOW(tx, {
             ns: args.ns,
-            parent: ns.parent,
-            collection: args.collection,
+            parent: parentNs,
+            type: args.type,
             where: args.where,
           })
         : await findData(tx, {
             ns: args.ns,
-            collection: args.collection,
+            type: args.type,
             where: args.where,
           })
 
       let deleted = 0
       for (const row of result.rows) {
-        if (ns?.parent) {
+        if (parentNs) {
           const rowMeta = row.meta as Record<string, unknown> | null
           const hasParent = rowMeta && '_parent' in rowMeta
           if (row.ns === args.ns && !hasParent) {
             // Branch-created doc (no _parent): delete the actual row
-            await deleteData(tx, { ns: args.ns, id: row.id })
+            await deleteData(tx, { ns: args.ns, seq: row.seq })
           } else {
             // Inherited from parent: write tombstone
             await insertData(tx, {
               ns: args.ns,
-              collection: '_tombstone',
-              doc: {},
-              meta: { _parent: row.id, _deleted: true },
+              type: '_tombstone',
+              id: `_tomb_${row.seq}`,
+              data: {},
+              meta: { _parent: row.seq, _deleted: true },
               rand: 0,
             })
           }
         } else {
-          await deleteData(tx, { ns: args.ns, id: row.id })
+          await deleteData(tx, { ns: args.ns, seq: row.seq })
         }
 
         deleted++
@@ -514,7 +553,7 @@ export class DocumentAdapter {
   // --- Relationships ---
 
   async relate(args: {
-    ns: number
+    ns: string
     from: string
     to: string
     path: string
@@ -526,34 +565,34 @@ export class DocumentAdapter {
     return transaction(this.pool, async (tx) => {
       const rel = await insertRel(tx, {
         ns: args.ns,
-        from: fromDecoded.id,
-        to: toDecoded.id,
+        from: fromDecoded.seq,
+        to: toDecoded.seq,
         path: args.path,
         sort: args.sort,
       })
-      return `rel_${rel.id}` as Sqid
+      return `rel_${rel.seq}` as Sqid
     })
   }
 
   async related(args: {
-    ns?: number
+    ns?: string
     id: string
     path?: string
     direction?: 'from' | 'to'
   }): Promise<Array<{ id: Sqid; path: string }>> {
-    const { id } = fromSqid(args.id)
+    const { seq } = fromSqid(args.id)
     const dir = args.direction ?? 'from'
 
     const rels = dir === 'from'
-      ? await findRelsFrom(this.pool, { from: id, path: args.path, ns: args.ns })
-      : await findRelsTo(this.pool, { to: id, ns: args.ns })
+      ? await findRelsFrom(this.pool, { from: seq, path: args.path, ns: args.ns })
+      : await findRelsTo(this.pool, { to: seq, ns: args.ns })
 
     const results: Array<{ id: Sqid; path: string }> = []
     for (const rel of rels) {
-      const targetId = dir === 'from' ? rel.to : rel.from
-      const target = await findOneData(this.pool, { ns: rel.ns, id: targetId })
+      const targetSeq = dir === 'from' ? rel.to : rel.from
+      const target = await findOneData(this.pool, { ns: rel.ns, seq: targetSeq })
       if (target) {
-        results.push({ id: this.rowToSqid(target), path: rel.path })
+        results.push({ id: this.rowToSqid(target), path: rel.path ?? '' })
       }
     }
     return results
@@ -562,58 +601,59 @@ export class DocumentAdapter {
   // --- Durable Execution ---
 
   async enqueue(args: {
-    ns: number
-    kind: string
+    ns: string
+    type: string
     name: string
     input?: unknown
     entity?: string
     scheduled?: Date
   }): Promise<Sqid> {
-    const entityId = args.entity ? fromSqid(args.entity).id : undefined
+    const entitySeq = args.entity ? fromSqid(args.entity).seq : undefined
 
     return transaction(this.pool, async (tx) => {
       const action = await enqueueAction(tx, {
         ns: args.ns,
-        kind: args.kind,
+        id: '', // placeholder
+        type: args.type,
         name: args.name,
         input: args.input,
-        entity: entityId,
+        entity: entitySeq,
         scheduled: args.scheduled,
       })
 
-      const ns = this.nsResolver.getById(args.ns)
-      const identity = ns?.githuborgid ?? args.ns
-      return toSqid('actions', action.id, identity, action.created, action.rand) as Sqid
+      const sqid = toSqid('actions', action.seq, args.ns, action.created, action.rand)
+      await query(tx, `UPDATE actions SET id = $1 WHERE seq = $2`, [sqid, action.seq])
+      return sqid as Sqid
     })
   }
 
-  async dequeue(args: { ns: number; kind?: string; limit?: number }): Promise<ActionRow[]> {
+  async dequeue(args: { ns: string; type?: string; limit?: number }): Promise<ActionRow[]> {
     return transaction(this.pool, async (tx) => {
       return dequeueActions(tx, args)
     })
   }
 
   async checkpoint(args: { id: string; step: number; result: unknown }): Promise<void> {
-    const { id } = fromSqid(args.id)
+    const { seq } = fromSqid(args.id)
     return transaction(this.pool, async (tx) => {
-      await checkpointAction(tx, { id, step: args.step, result: args.result })
+      await checkpointAction(tx, { seq, step: args.step, result: args.result })
     })
   }
 
   async complete(args: { id: string; output?: unknown }): Promise<void> {
-    const { id } = fromSqid(args.id)
-    await completeAction(this.pool, { id, output: args.output })
+    const { seq } = fromSqid(args.id)
+    await completeAction(this.pool, { seq, output: args.output })
   }
 
   async fail(args: { id: string; error: unknown }): Promise<void> {
-    const { id } = fromSqid(args.id)
-    await failAction(this.pool, { id, error: args.error })
+    const { seq } = fromSqid(args.id)
+    await failAction(this.pool, { seq, error: args.error })
   }
 
   // --- Events ---
 
   async emit(args: {
-    ns: number
+    ns: string
     kind: string
     entity?: number
     actor?: number
@@ -625,22 +665,21 @@ export class DocumentAdapter {
   // --- Search ---
 
   async search(args: {
-    ns: number
+    ns: string
     query: string
-    collection?: string
+    type?: string
     limit?: number
   }): Promise<{ docs: Array<{ id: Sqid }>; scores: number[] }> {
-    // Delegates to PG view over ClickHouse search table
     const conditions = ['ns = $1']
     const params: unknown[] = [args.ns]
     let paramIdx = 2
 
-    if (args.collection) {
-      conditions.push(`collection = $${paramIdx++}`)
-      params.push(args.collection)
+    if (args.type) {
+      conditions.push(`type = $${paramIdx++}`)
+      params.push(args.type)
     }
 
-    conditions.push(`(title ILIKE $${paramIdx} OR body ILIKE $${paramIdx})`)
+    conditions.push(`(name ILIKE $${paramIdx} OR data::text ILIKE $${paramIdx})`)
     params.push(`%${args.query}%`)
     paramIdx++
 
@@ -648,29 +687,25 @@ export class DocumentAdapter {
     params.push(limit)
 
     const sql = `
-      SELECT entity, collection, ns FROM search_view
+      SELECT seq, type, ns, rand, created FROM data
       WHERE ${conditions.join(' AND ')}
       LIMIT $${paramIdx}
     `
 
-    const result = await query<{ entity: number; collection: string; ns: number }>(
+    const result = await query<{ seq: number; type: string; ns: string; rand: number; created: Date }>(
       this.pool, sql, params,
     )
 
-    const docs = result.rows.map(row => {
-      const nsRow = this.nsResolver.getById(row.ns)
-      const identity = nsRow?.githuborgid ?? row.ns
-      return {
-        id: toSqid(row.collection, row.entity, identity, new Date(), 0) as Sqid,
-      }
-    })
+    const docs = result.rows.map(row => ({
+      id: toSqid(row.type, row.seq, row.ns, row.created, row.rand) as Sqid,
+    }))
 
     return { docs, scores: result.rows.map(() => 1) }
   }
 
   async findSimilar(args: {
-    ns: number
-    collection?: string
+    ns: string
+    type?: string
     embedding: number[]
     limit?: number
   }): Promise<{ docs: Array<{ id: Sqid }>; scores: number[] }> {
@@ -678,9 +713,9 @@ export class DocumentAdapter {
     const params: unknown[] = [args.ns]
     let paramIdx = 2
 
-    if (args.collection) {
-      conditions.push(`collection = $${paramIdx++}`)
-      params.push(args.collection)
+    if (args.type) {
+      conditions.push(`type = $${paramIdx++}`)
+      params.push(args.type)
     }
 
     params.push(`[${args.embedding.join(',')}]`)
@@ -689,7 +724,7 @@ export class DocumentAdapter {
     params.push(limit)
 
     const sql = `
-      SELECT id, ns, collection, rand, created, embedding <=> ${embParam}::vector AS score
+      SELECT seq, ns, type, rand, created, embedding <=> ${embParam}::vector AS score
       FROM data
       WHERE ${conditions.join(' AND ')} AND embedding IS NOT NULL
       ORDER BY score ASC
@@ -708,30 +743,25 @@ export class DocumentAdapter {
 
   // --- Namespace ---
 
-  async resolveNs(req: { headers: { host?: string }; url?: string }): Promise<NsRow | null> {
+  async resolveNs(req: { headers: { host?: string }; url?: string }): Promise<DataRow | null> {
     return this.nsResolver.resolveFromRequest(req)
   }
 
   async createBranch(args: {
-    parent: number
-    uri: string
+    parentNs: string
+    ns: string
+    name?: string
     branch?: string
     kind?: string
     ttl?: string
     pr?: number
-  }): Promise<NsRow> {
-    const parentNs = this.nsResolver.getById(args.parent)
-    const ns = await createBranch(this.pool, {
-      ...args,
-      repo: parentNs?.repo ?? undefined,
-      root: parentNs?.root ?? '/',
-      githuborgid: parentNs?.githuborgid,
-    })
+  }): Promise<DataRow> {
+    const ns = await createBranch(this.pool, args)
     await this.nsResolver.refresh()
     return ns
   }
 
-  async mergeBranch(branchNs: number): Promise<{ merged: number; deleted: number }> {
+  async mergeBranch(branchNs: string): Promise<{ merged: number; deleted: number }> {
     const result = await mergeBranch(this.pool, branchNs)
     await this.nsResolver.refresh()
     return result
@@ -741,71 +771,71 @@ export class DocumentAdapter {
 // --- Helpers ---
 
 interface RelWithTarget extends RelRow {
-  targetCollection: string
+  targetType: string
   targetCreated: Date
   targetRand: number
-  targetNs: number
+  targetNs: string
 }
 
 async function fetchRelsWithTargets(
   pool: PgPool,
-  fromId: number,
-  ns?: number,
+  fromSeq: number,
+  ns?: string,
 ): Promise<RelWithTarget[]> {
   if (ns !== undefined) {
     const result = await query<RelWithTarget>(
       pool,
-      `SELECT r.*, d.collection AS "targetCollection", d.created AS "targetCreated",
+      `SELECT r.*, d.type AS "targetType", d.created AS "targetCreated",
               d.rand AS "targetRand", d.ns AS "targetNs"
        FROM rels r
-       JOIN data d ON d.id = r."to"
+       JOIN data d ON d.seq = r."to"
        WHERE r."from" = $1 AND r.ns = $2
        ORDER BY r.path, r.sort`,
-      [fromId, ns],
+      [fromSeq, ns],
     )
     return result.rows
   }
   const result = await query<RelWithTarget>(
     pool,
-    `SELECT r.*, d.collection AS "targetCollection", d.created AS "targetCreated",
+    `SELECT r.*, d.type AS "targetType", d.created AS "targetCreated",
             d.rand AS "targetRand", d.ns AS "targetNs"
      FROM rels r
-     JOIN data d ON d.id = r."to"
+     JOIN data d ON d.seq = r."to"
      WHERE r."from" = $1
      ORDER BY r.path, r.sort`,
-    [fromId],
+    [fromSeq],
   )
   return result.rows
 }
 
 async function batchFetchRelsWithTargets(
   pool: PgPool,
-  fromIds: number[],
-  ns?: number,
+  fromSeqs: number[],
+  ns?: string,
 ): Promise<Map<number, RelWithTarget[]>> {
   const map = new Map<number, RelWithTarget[]>()
-  if (fromIds.length === 0) return map
+  if (fromSeqs.length === 0) return map
 
   const result = ns !== undefined
     ? await query<RelWithTarget>(
         pool,
-        `SELECT r.*, d.collection AS "targetCollection", d.created AS "targetCreated",
+        `SELECT r.*, d.type AS "targetType", d.created AS "targetCreated",
                 d.rand AS "targetRand", d.ns AS "targetNs"
          FROM rels r
-         JOIN data d ON d.id = r."to"
+         JOIN data d ON d.seq = r."to"
          WHERE r."from" = ANY($1) AND r.ns = $2
          ORDER BY r."from", r.path, r.sort`,
-        [fromIds, ns],
+        [fromSeqs, ns],
       )
     : await query<RelWithTarget>(
         pool,
-        `SELECT r.*, d.collection AS "targetCollection", d.created AS "targetCreated",
+        `SELECT r.*, d.type AS "targetType", d.created AS "targetCreated",
                 d.rand AS "targetRand", d.ns AS "targetNs"
          FROM rels r
-         JOIN data d ON d.id = r."to"
+         JOIN data d ON d.seq = r."to"
          WHERE r."from" = ANY($1)
          ORDER BY r."from", r.path, r.sort`,
-        [fromIds],
+        [fromSeqs],
       )
 
   for (const row of result.rows) {
@@ -822,43 +852,47 @@ async function batchFetchRelsWithTargets(
 
 function relsToDoc(
   rels: RelWithTarget[],
-  nsResolver: NsResolver,
+  _ns: string,
 ): Record<string, unknown> {
   const result: Record<string, unknown> = {}
   const grouped = new Map<string, RelWithTarget[]>()
 
   for (const rel of rels) {
-    const basePath = rel.path.replace(/\.\d+$/, '')
+    const path = rel.path ?? ''
+    const basePath = path.replace(/\.\d+$/, '')
     if (!grouped.has(basePath)) grouped.set(basePath, [])
     grouped.get(basePath)!.push(rel)
   }
 
   for (const [path, pathRels] of grouped) {
-    if (pathRels.length === 1 && !pathRels[0].path.match(/\.\d+$/)) {
+    if (pathRels.length === 1 && pathRels[0].path && !pathRels[0].path.match(/\.\d+$/)) {
       const r = pathRels[0]
-      const nsRow = nsResolver.getById(r.targetNs)
-      const identity = nsRow?.githuborgid ?? r.targetNs
-      result[path] = toSqid(r.targetCollection, r.to, identity, r.targetCreated, r.targetRand)
+      result[path] = toSqid(r.targetType, r.to, r.targetNs, r.targetCreated, r.targetRand)
     } else {
       result[path] = pathRels
         .sort((a, b) => a.sort - b.sort)
-        .map(r => {
-          const nsRow = nsResolver.getById(r.targetNs)
-          const identity = nsRow?.githuborgid ?? r.targetNs
-          return toSqid(r.targetCollection, r.to, identity, r.targetCreated, r.targetRand)
-        })
+        .map(r => toSqid(r.targetType, r.to, r.targetNs, r.targetCreated, r.targetRand))
     }
   }
 
   return result
 }
 
-/** Fields that belong in the `meta` JSONB column rather than `doc` JSON */
-const META_FIELDS = new Set(['_parent', '_globalSlug'])
+/**
+ * Build a URL from ns, type, and slug/id.
+ */
+function buildUrl(_ns: string, type: string, slugOrId?: string): string | null {
+  if (!slugOrId) return null
+  return `/${type}/${slugOrId}`
+}
+
+/** Fields that belong in the `meta` JSONB column rather than `data` JSONB */
+const META_FIELDS = new Set(['_parent', '_globalSlug', '_deleted'])
 
 /**
- * Split adapter-internal fields into `meta` and user content into `doc`.
- * `meta` is stored as JSONB (queryable), `doc` is stored as JSON (preserves key order).
+ * Split adapter-internal fields into `meta` and user content into `data`.
+ * `meta` is stored as JSONB (queryable for internal lookups),
+ * `data` is stored as JSONB (the full Payload document).
  */
 function splitMeta(data: Record<string, unknown>): { doc: Record<string, unknown>; meta: Record<string, unknown> } {
   const doc: Record<string, unknown> = {}

@@ -1,12 +1,12 @@
 import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest'
-import { getTestPool, setupTestSchema, cleanupTestData, teardownTestPool } from './setup.js'
+import { getTestPool, setupTestSchema, cleanupTestData, createTestNs, teardownTestPool } from './setup.js'
 import { query, transaction } from '../src/db/pg.js'
 import { insertData } from '../src/db/queries/data.js'
 import { whereToSQL } from '../src/db/where.js'
 import type pg from 'pg'
 
 let pool: pg.Pool
-let nsId: number
+let ns: string
 
 beforeAll(async () => {
   pool = getTestPool() as unknown as pg.Pool
@@ -19,26 +19,22 @@ afterAll(async () => {
 
 beforeEach(async () => {
   await cleanupTestData()
-  const result = await query<{ id: number }>(
-    pool,
-    `INSERT INTO ns (uri, name, kind) VALUES ('where.test', 'Test', 'production') RETURNING id`,
-  )
-  nsId = result.rows[0].id
+  ns = await createTestNs('where.test', 'Test')
 
   // Seed test data
   await transaction(pool, async (tx) => {
-    await insertData(tx, { ns: nsId, collection: 'posts', doc: { title: 'Alpha', score: 10, tags: ['tech', 'science'] }, status: 'published', rand: 1 })
-    await insertData(tx, { ns: nsId, collection: 'posts', doc: { title: 'Beta', score: 20, tags: ['art'] }, status: 'draft', rand: 2 })
-    await insertData(tx, { ns: nsId, collection: 'posts', doc: { title: 'Gamma', score: 30, tags: ['tech'] }, status: 'published', rand: 3 })
-    await insertData(tx, { ns: nsId, collection: 'posts', doc: { title: 'Delta', score: 40 }, status: 'archived', locale: 'fr', rand: 4 })
-    await insertData(tx, { ns: nsId, collection: 'posts', doc: { title: null, score: 50 }, rand: 5 })
+    await insertData(tx, { ns, type: 'posts', id: 'w-alpha', data: { title: 'Alpha', score: 10, tags: ['tech', 'science'] }, status: 'published', rand: 1 })
+    await insertData(tx, { ns, type: 'posts', id: 'w-beta', data: { title: 'Beta', score: 20, tags: ['art'] }, status: 'draft', rand: 2 })
+    await insertData(tx, { ns, type: 'posts', id: 'w-gamma', data: { title: 'Gamma', score: 30, tags: ['tech'] }, status: 'published', rand: 3 })
+    await insertData(tx, { ns, type: 'posts', id: 'w-delta', data: { title: 'Delta', score: 40 }, status: 'archived', locale: 'fr', rand: 4 })
+    await insertData(tx, { ns, type: 'posts', id: 'w-null', data: { title: null, score: 50 }, rand: 5 })
   })
 })
 
 async function findWithWhere(where: Record<string, unknown>): Promise<number> {
   const w = whereToSQL(where, 'data', 3)
-  const sql = `SELECT count(*) AS cnt FROM data WHERE ns = $1 AND collection = $2 AND ${w.sql}`
-  const result = await query<{ cnt: number }>(pool, sql, [nsId, 'posts', ...w.params])
+  const sql = `SELECT count(*) AS cnt FROM data WHERE ns = $1 AND type = $2 AND ${w.sql}`
+  const result = await query<{ cnt: number }>(pool, sql, [ns, 'posts', ...w.params])
   return result.rows[0].cnt
 }
 

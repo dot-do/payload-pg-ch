@@ -2,7 +2,7 @@
  * Phase 3 TDD: Remaining collections, governance, budget, events, E2E
  */
 import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest'
-import { getTestPool, setupTestSchema, cleanupTestData, teardownTestPool } from './setup.js'
+import { getTestPool, setupTestSchema, cleanupTestData, createTestNs, teardownTestPool } from './setup.js'
 import { DocumentAdapter } from '../src/adapter.js'
 import { fromSqid } from '../src/id/sqids.js'
 import { query } from '../src/db/pg.js'
@@ -47,7 +47,7 @@ const COLLECTIONS = [
 
 let adapter: DocumentAdapter
 let pool: pg.Pool
-let nsId: number
+let ns: string
 
 beforeAll(async () => {
   pool = getTestPool() as unknown as pg.Pool
@@ -62,39 +62,38 @@ afterAll(async () => {
 
 beforeEach(async () => {
   await cleanupTestData()
-  const result = await query<{ id: number }>(pool, `INSERT INTO ns (uri, name, kind) VALUES ('phase3.test', 'Phase3', 'production') RETURNING id`)
-  nsId = result.rows[0].id
+  ns = await createTestNs('phase3.test', 'Phase3')
   await adapter.nsResolver.refresh()
 })
 
 // BEAD ebe: Votes, Suggestions, Documents
 describe('Votes, Suggestions, Documents', () => {
   it('creates versioned document, suggestion, and vote', async () => {
-    const user = await adapter.create({ ns: nsId, collection: 'users', data: { email: 'alice@test.com', name: 'Alice' } })
-    const chat = await adapter.create({ ns: nsId, collection: 'chats', data: { title: 'Design Chat' } })
-    const userId = fromSqid(user.id).id
-    const chatId = fromSqid(chat.id).id
+    const user = await adapter.create({ ns, type: 'users', data: { email: 'alice@test.com', name: 'Alice' } })
+    const chat = await adapter.create({ ns, type: 'chats', data: { title: 'Design Chat' } })
+    const userId = fromSqid(user.id).seq
+    const chatId = fromSqid(chat.id).seq
 
     // Create document
-    const doc = await adapter.create({ ns: nsId, collection: 'documents', data: { title: 'Design Spec', content: 'Initial draft', kind: 'text', user: userId, chat: chatId } })
+    const doc = await adapter.create({ ns, type: 'documents', data: { title: 'Design Spec', content: 'Initial draft', type: 'text', user: userId, chat: chatId } })
     expect(doc.id).toMatch(/^doc_/)
 
     // Create message
-    const msg = await adapter.create({ ns: nsId, collection: 'messages', data: { chat: chatId, role: 'assistant', parts: [{ type: 'text', text: 'Suggestion' }] } })
+    const msg = await adapter.create({ ns, type: 'messages', data: { chat: chatId, role: 'assistant', parts: [{ type: 'text', text: 'Suggestion' }] } })
 
     // Create suggestion on document
     const sug = await adapter.create({
-      ns: nsId, collection: 'suggestions',
-      data: { document: fromSqid(doc.id).id, message: fromSqid(msg.id).id, originalText: 'Initial draft', suggestedText: 'Revised draft', status: 'pending' },
+      ns, type: 'suggestions',
+      data: { document: fromSqid(doc.id).seq, message: fromSqid(msg.id).seq, originalText: 'Initial draft', suggestedText: 'Revised draft', status: 'pending' },
     })
     expect(sug.id).toMatch(/^sug_/)
 
-    const foundSug = await adapter.findOne({ ns: nsId, collection: 'suggestions', id: sug.id })
+    const foundSug = await adapter.findOne({ ns, type: 'suggestions', id: sug.id })
     expect(foundSug!.document).toBe(doc.id)
     expect(foundSug!.message).toBe(msg.id)
 
     // Create vote on message
-    const vote = await adapter.create({ ns: nsId, collection: 'votes', data: { message: fromSqid(msg.id).id, user: userId, vote: 'up' } })
+    const vote = await adapter.create({ ns, type: 'votes', data: { message: fromSqid(msg.id).seq, user: userId, vote: 'up' } })
     expect(vote.id).toMatch(/^vot_/)
   })
 })
@@ -102,24 +101,24 @@ describe('Votes, Suggestions, Documents', () => {
 // BEAD ftd: Agent sessions and memories
 describe('Agent sessions and memories', () => {
   it('creates session and scoped memories', async () => {
-    const agent = await adapter.create({ ns: nsId, collection: 'agents', data: { name: 'Memory Agent' } })
-    const agentId = fromSqid(agent.id).id
+    const agent = await adapter.create({ ns, type: 'agents', data: { name: 'Memory Agent' } })
+    const agentId = fromSqid(agent.id).seq
 
-    const session = await adapter.create({ ns: nsId, collection: 'agent-sessions', data: { agent: agentId, status: 'active', context: { task: 'research' } } })
+    const session = await adapter.create({ ns, type: 'agent-sessions', data: { agent: agentId, status: 'active', context: { task: 'research' } } })
     expect(session.id).toMatch(/^asn_/)
 
     // Session-scoped memory
-    await adapter.create({ ns: nsId, collection: 'memories', data: { key: 'last_query', value: 'AI news', agent: agentId, scope: 'session' } })
+    await adapter.create({ ns, type: 'memories', data: { key: 'last_query', value: 'AI news', agent: agentId, scope: 'session' } })
     // Agent-global memory
-    await adapter.create({ ns: nsId, collection: 'memories', data: { key: 'preference', value: 'concise', agent: agentId, scope: 'agent' } })
+    await adapter.create({ ns, type: 'memories', data: { key: 'preference', value: 'concise', agent: agentId, scope: 'agent' } })
     // Global memory
-    await adapter.create({ ns: nsId, collection: 'memories', data: { key: 'system_info', value: 'v2.0', scope: 'global' } })
+    await adapter.create({ ns, type: 'memories', data: { key: 'system_info', value: 'v2.0', scope: 'global' } })
 
-    const allMemories = await adapter.find({ ns: nsId, collection: 'memories' })
+    const allMemories = await adapter.find({ ns, type: 'memories' })
     expect(allMemories.total).toBe(3)
 
     // Filter by scope
-    const agentMemories = await adapter.find({ ns: nsId, collection: 'memories', where: { scope: { equals: 'agent' } } })
+    const agentMemories = await adapter.find({ ns, type: 'memories', where: { scope: { equals: 'agent' } } })
     expect(agentMemories.total).toBe(1)
     expect(agentMemories.docs[0].key).toBe('preference')
   })
@@ -149,21 +148,21 @@ describe('Tool governance', () => {
 // BEAD d8w: Issue execution via actions table
 describe('Issue execution on agent assign', () => {
   it('assigning agent to issue enqueues an action', async () => {
-    const agent = await adapter.create({ ns: nsId, collection: 'agents', data: { name: 'Worker' } })
-    const project = await adapter.create({ ns: nsId, collection: 'projects', data: { name: 'Test Project', status: 'active' } })
+    const agent = await adapter.create({ ns, type: 'agents', data: { name: 'Worker' } })
+    const project = await adapter.create({ ns, type: 'projects', data: { name: 'Test Project', status: 'active' } })
     const issue = await adapter.create({
-      ns: nsId, collection: 'issues',
-      data: { title: 'Implement feature', status: 'todo', project: fromSqid(project.id).id },
+      ns, type: 'issues',
+      data: { title: 'Implement feature', status: 'todo', project: fromSqid(project.id).seq },
     })
 
     // Assign agent to issue
     await adapter.updateOne({
-      ns: nsId, collection: 'issues', id: issue.id,
-      data: { assignedAgent: fromSqid(agent.id).id, status: 'in-progress' },
+      ns, type: 'issues', id: issue.id,
+      data: { assignedAgent: fromSqid(agent.id).seq, status: 'in-progress' },
     })
 
     // Verify the issue was updated
-    const found = await adapter.findOne({ ns: nsId, collection: 'issues', id: issue.id })
+    const found = await adapter.findOne({ ns, type: 'issues', id: issue.id })
     expect(found!.assignedAgent).toBe(agent.id)
     expect(found!.status).toBe('in-progress')
   })
@@ -174,18 +173,18 @@ describe('Budget policies with enforcement', () => {
   it('detects budget threshold breach', async () => {
     const { checkBudget } = await import('../src/finance/budget.js')
 
-    const agent = await adapter.create({ ns: nsId, collection: 'agents', data: { name: 'Spender' } })
-    const agentId = fromSqid(agent.id).id
+    const agent = await adapter.create({ ns, type: 'agents', data: { name: 'Spender' } })
+    const agentId = fromSqid(agent.id).seq
 
     // Create budget policy
-    await adapter.create({ ns: nsId, collection: 'budget-policies', data: { name: 'Agent Monthly', limit: 1000, period: 'monthly' } })
+    await adapter.create({ ns, type: 'budget-policies', data: { name: 'Agent Monthly', limit: 1000, period: 'monthly' } })
 
     // Create cost events totaling 850 (85% of 1000)
     for (let i = 0; i < 17; i++) {
-      await adapter.create({ ns: nsId, collection: 'cost-events', data: { kind: 'llm', amount: 50, agent: agentId } })
+      await adapter.create({ ns, type: 'cost-events', data: { type: 'llm', amount: 50, agent: agentId } })
     }
 
-    const result = await checkBudget(pool, nsId, 1000)
+    const result = await checkBudget(pool, ns, 1000)
     expect(result.totalSpent).toBe(850)
     expect(result.percentUsed).toBeCloseTo(85)
     expect(result.exceeded).toBe(false)
@@ -196,10 +195,10 @@ describe('Budget policies with enforcement', () => {
 // BEAD 2e8: Typed event emission
 describe('Typed event emission', () => {
   it('emit writes non-mutation events to events table', async () => {
-    await adapter.emit({ ns: nsId, kind: 'page.viewed', meta: { path: '/test' } })
-    await adapter.emit({ ns: nsId, kind: 'search.query', meta: { query: 'test' } })
+    await adapter.emit({ ns, kind: 'page.viewed', meta: { path: '/test' } })
+    await adapter.emit({ ns, kind: 'search.query', meta: { query: 'test' } })
 
-    const events = await query<{ kind: string }>(pool, `SELECT kind FROM events WHERE ns = $1 ORDER BY created`, [nsId])
+    const events = await query<{ kind: string }>(pool, `SELECT kind FROM events WHERE ns = $1 ORDER BY created`, [ns])
     const kinds = events.rows.map(r => r.kind)
     expect(kinds).toContain('page.viewed')
     expect(kinds).toContain('search.query')
@@ -210,19 +209,19 @@ describe('Typed event emission', () => {
 describe('Thing CRUD through dynamic noun collections', () => {
   it('creates things via dynamic collection slug', async () => {
     await adapter.create({
-      ns: nsId, collection: 'nouns',
+      ns, type: 'nouns',
       data: { name: 'Contact', slug: 'contact', schema: { fields: [{ name: 'firstName', type: 'text' }, { name: 'email', type: 'email' }] } },
     })
 
-    await adapter.loadDynamicCollections(nsId)
+    await adapter.loadDynamicCollections(ns)
 
-    const c1 = await adapter.create({ ns: nsId, collection: 'contact', data: { firstName: 'Alice', email: 'alice@test.com' } })
-    const c2 = await adapter.create({ ns: nsId, collection: 'contact', data: { firstName: 'Bob', email: 'bob@test.com' } })
+    const c1 = await adapter.create({ ns, type: 'contact', data: { firstName: 'Alice', email: 'alice@test.com' } })
+    const c2 = await adapter.create({ ns, type: 'contact', data: { firstName: 'Bob', email: 'bob@test.com' } })
 
-    const contacts = await adapter.find({ ns: nsId, collection: 'contact' })
+    const contacts = await adapter.find({ ns, type: 'contact' })
     expect(contacts.total).toBe(2)
 
-    const found = await adapter.findOne({ ns: nsId, collection: 'contact', id: c1.id })
+    const found = await adapter.findOne({ ns, type: 'contact', id: c1.id })
     expect(found!.firstName).toBe('Alice')
   })
 })
@@ -230,25 +229,25 @@ describe('Thing CRUD through dynamic noun collections', () => {
 // BEAD f6o: Streams
 describe('Stream lifecycle', () => {
   it('creates and manages stream status', async () => {
-    const chat = await adapter.create({ ns: nsId, collection: 'chats', data: { title: 'Streaming Chat' } })
-    const chatId = fromSqid(chat.id).id
+    const chat = await adapter.create({ ns, type: 'chats', data: { title: 'Streaming Chat' } })
+    const chatId = fromSqid(chat.id).seq
 
     const stream = await adapter.create({
-      ns: nsId, collection: 'streams',
+      ns, type: 'streams',
       data: { chat: chatId, streamId: 'stream-abc-123', status: 'active' },
     })
     expect(stream.id).toMatch(/^stm_/)
 
     await adapter.updateOne({
-      ns: nsId, collection: 'streams', id: stream.id,
+      ns, type: 'streams', id: stream.id,
       data: { status: 'completed' },
     })
 
-    const found = await adapter.findOne({ ns: nsId, collection: 'streams', id: stream.id })
+    const found = await adapter.findOne({ ns, type: 'streams', id: stream.id })
     expect(found!.status).toBe('completed')
 
     // Filter by status
-    const active = await adapter.find({ ns: nsId, collection: 'streams', where: { status: { equals: 'active' } } })
+    const active = await adapter.find({ ns, type: 'streams', where: { status: { equals: 'active' } } })
     expect(active.total).toBe(0)
   })
 })
@@ -256,28 +255,28 @@ describe('Stream lifecycle', () => {
 // BEAD dnd: Goals + Approvals
 describe('Goals + Approvals', () => {
   it('creates goal linked to project, approval with workflow', async () => {
-    const user = await adapter.create({ ns: nsId, collection: 'users', data: { email: 'pm@test.com', name: 'PM' } })
-    const project = await adapter.create({ ns: nsId, collection: 'projects', data: { name: 'Q1 Goals', status: 'active' } })
+    const user = await adapter.create({ ns, type: 'users', data: { email: 'pm@test.com', name: 'PM' } })
+    const project = await adapter.create({ ns, type: 'projects', data: { name: 'Q1 Goals', status: 'active' } })
 
     const goal = await adapter.create({
-      ns: nsId, collection: 'goals',
-      data: { title: 'Increase Revenue 20%', status: 'on-track', project: fromSqid(project.id).id },
+      ns, type: 'goals',
+      data: { title: 'Increase Revenue 20%', status: 'on-track', project: fromSqid(project.id).seq },
     })
     expect(goal.id).toMatch(/^gol_/)
 
     const approval = await adapter.create({
-      ns: nsId, collection: 'approvals',
-      data: { title: 'Approve Budget Increase', status: 'pending', requester: fromSqid(user.id).id },
+      ns, type: 'approvals',
+      data: { title: 'Approve Budget Increase', status: 'pending', requester: fromSqid(user.id).seq },
     })
     expect(approval.id).toMatch(/^apr_/)
 
-    const found = await adapter.findOne({ ns: nsId, collection: 'approvals', id: approval.id })
+    const found = await adapter.findOne({ ns, type: 'approvals', id: approval.id })
     expect(found!.requester).toBe(user.id)
     expect(found!.status).toBe('pending')
 
     // Approve
-    await adapter.updateOne({ ns: nsId, collection: 'approvals', id: approval.id, data: { status: 'approved' } })
-    const approved = await adapter.findOne({ ns: nsId, collection: 'approvals', id: approval.id })
+    await adapter.updateOne({ ns, type: 'approvals', id: approval.id, data: { status: 'approved' } })
+    const approved = await adapter.findOne({ ns, type: 'approvals', id: approval.id })
     expect(approved!.status).toBe('approved')
   })
 })
@@ -285,22 +284,22 @@ describe('Goals + Approvals', () => {
 // BEAD 2qq: Polymorphic comments
 describe('Polymorphic comments', () => {
   it('creates threaded comments on issues', async () => {
-    const user = await adapter.create({ ns: nsId, collection: 'users', data: { email: 'dev@test.com', name: 'Dev' } })
-    const userId = fromSqid(user.id).id
+    const user = await adapter.create({ ns, type: 'users', data: { email: 'dev@test.com', name: 'Dev' } })
+    const userId = fromSqid(user.id).seq
 
     const comment1 = await adapter.create({
-      ns: nsId, collection: 'comments',
+      ns, type: 'comments',
       data: { body: 'This needs review', author: userId },
     })
     expect(comment1.id).toMatch(/^cmn_/)
 
     // Reply
     const reply = await adapter.create({
-      ns: nsId, collection: 'comments',
-      data: { body: 'I agree, lets discuss', author: userId, parent: fromSqid(comment1.id).id },
+      ns, type: 'comments',
+      data: { body: 'I agree, lets discuss', author: userId, parent: fromSqid(comment1.id).seq },
     })
 
-    const found = await adapter.findOne({ ns: nsId, collection: 'comments', id: reply.id })
+    const found = await adapter.findOne({ ns, type: 'comments', id: reply.id })
     expect(found!.parent).toBe(comment1.id)
   })
 })
@@ -308,56 +307,56 @@ describe('Polymorphic comments', () => {
 // BEAD h4p: E2E Agent lifecycle
 describe('E2E: Agent lifecycle with cost tracking', () => {
   it('full lifecycle: create agent → run → checkpoint → cost → complete', async () => {
-    const model = await adapter.create({ ns: nsId, collection: 'models', data: { name: 'Claude', modelId: 'claude-sonnet-4-6' } })
-    const fn = await adapter.create({ ns: nsId, collection: 'functions', data: { name: 'search' } })
-    const tool = await adapter.create({ ns: nsId, collection: 'tools', data: { name: 'Search', function: fromSqid(fn.id).id } })
+    const model = await adapter.create({ ns, type: 'models', data: { name: 'Claude', modelId: 'claude-sonnet-4-6' } })
+    const fn = await adapter.create({ ns, type: 'functions', data: { name: 'search' } })
+    const tool = await adapter.create({ ns, type: 'tools', data: { name: 'Search', function: fromSqid(fn.id).seq } })
 
     const agent = await adapter.create({
-      ns: nsId, collection: 'agents',
-      data: { name: 'E2E Agent', model: fromSqid(model.id).id, tools: [fromSqid(tool.id).id], config: { temperature: 0.5 } },
+      ns, type: 'agents',
+      data: { name: 'E2E Agent', model: fromSqid(model.id).seq, tools: [fromSqid(tool.id).seq], config: { temperature: 0.5 } },
     })
-    const agentId = fromSqid(agent.id).id
+    const agentId = fromSqid(agent.id).seq
 
     // Start session
-    const session = await adapter.create({ ns: nsId, collection: 'agent-sessions', data: { agent: agentId, status: 'active' } })
+    const session = await adapter.create({ ns, type: 'agent-sessions', data: { agent: agentId, status: 'active' } })
 
     // Create agent-run
     const run = await adapter.create({
-      ns: nsId, collection: 'agent-runs',
-      data: { kind: 'agent-run', name: 'e2e-test', input: { agentId, task: 'Research AI' } },
+      ns, type: 'agent-runs',
+      data: { type: 'agent-run', name: 'e2e-test', input: { agentId, task: 'Research AI' } },
     })
 
     // Dequeue and execute
-    const dequeued = await adapter.dequeue({ ns: nsId, kind: 'agent-run', limit: 1 })
+    const dequeued = await adapter.dequeue({ ns, type: 'agent-run', limit: 1 })
     expect(dequeued).toHaveLength(1)
 
     // Checkpoint: tool call
     await adapter.checkpoint({ id: run.id, step: 1, result: { tool: 'search', output: ['result1'] } })
 
     // Cost event
-    await adapter.create({ ns: nsId, collection: 'cost-events', data: { kind: 'llm', amount: 150, agent: agentId } })
+    await adapter.create({ ns, type: 'cost-events', data: { type: 'llm', amount: 150, agent: agentId } })
 
     // Memory
-    await adapter.create({ ns: nsId, collection: 'memories', data: { key: 'task_result', value: 'Found 3 articles', agent: agentId, scope: 'session' } })
+    await adapter.create({ ns, type: 'memories', data: { key: 'task_result', value: 'Found 3 articles', agent: agentId, scope: 'session' } })
 
     // Complete
     await adapter.complete({ id: run.id, output: { answer: '3 articles found' } })
 
     // Close session
-    await adapter.updateOne({ ns: nsId, collection: 'agent-sessions', id: session.id, data: { status: 'closed' } })
+    await adapter.updateOne({ ns, type: 'agent-sessions', id: session.id, data: { status: 'closed' } })
 
     // Verify everything
-    const finalAgent = await adapter.findOne({ ns: nsId, collection: 'agents', id: agent.id })
+    const finalAgent = await adapter.findOne({ ns, type: 'agents', id: agent.id })
     expect(finalAgent!.name).toBe('E2E Agent')
 
-    const costs = await adapter.find({ ns: nsId, collection: 'cost-events' })
+    const costs = await adapter.find({ ns, type: 'cost-events' })
     expect(costs.total).toBe(1)
 
-    const memories = await adapter.find({ ns: nsId, collection: 'memories' })
+    const memories = await adapter.find({ ns, type: 'memories' })
     expect(memories.total).toBe(1)
 
     // Verify the agent session was closed
-    const closedSession = await adapter.findOne({ ns: nsId, collection: 'agent-sessions', id: session.id })
+    const closedSession = await adapter.findOne({ ns, type: 'agent-sessions', id: session.id })
     expect(closedSession!.status).toBe('closed')
   })
 })

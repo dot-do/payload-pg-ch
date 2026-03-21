@@ -1,9 +1,9 @@
-import type { NsRow } from '../types.js'
+import type { DataRow } from '../types.js'
 import type { NsResolver } from '../ns/resolver.js'
 
 export interface HookContext {
   req: { headers: { host?: string }; url?: string }
-  ns?: NsRow
+  ns?: DataRow
   actor?: number
 }
 

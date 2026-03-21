@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest'
-import { getTestPool, setupTestSchema, cleanupTestData, teardownTestPool } from './setup.js'
+import { getTestPool, setupTestSchema, cleanupTestData, createTestNs, teardownTestPool } from './setup.js'
 import { query, transaction } from '../src/db/pg.js'
 import { insertData } from '../src/db/queries/data.js'
 import { insertSearch, searchByEmbedding } from '../src/db/queries/search.js'
@@ -7,7 +7,7 @@ import { runRetention } from '../src/workers/retention.js'
 import type pg from 'pg'
 
 let pool: pg.Pool
-let nsId: number
+let ns: string
 
 beforeAll(async () => {
   pool = getTestPool() as unknown as pg.Pool
@@ -20,25 +20,21 @@ afterAll(async () => {
 
 beforeEach(async () => {
   await cleanupTestData()
-  const result = await query<{ id: number }>(
-    pool,
-    `INSERT INTO ns (uri, name, kind) VALUES ('workers.test', 'Test', 'production') RETURNING id`,
-  )
-  nsId = result.rows[0].id
+  ns = await createTestNs('workers.test', 'Test')
 })
 
 describe('retention worker', () => {
   it('prunes old search transit rows', async () => {
     await transaction(pool, async (tx) => {
       await insertSearch(tx, {
-        ns: nsId, entity: 1, collection: 'posts', version: 1,
-        title: 'Old', body: 'Old content',
+        ns, entity: 1, type: 'posts', version: 1,
+        name: 'Old', body: 'Old content',
       })
     })
     // Backdate the row
     await query(pool,
       `UPDATE search SET created = now() - interval '30 days' WHERE ns = $1`,
-      [nsId],
+      [ns],
     )
 
     const result = await runRetention(pool, { searchRetentionDays: 7 })
@@ -50,33 +46,33 @@ describe('search transit table', () => {
   it('inserts and queries search entries', async () => {
     await transaction(pool, async (tx) => {
       await insertSearch(tx, {
-        ns: nsId,
+        ns,
         entity: 1,
-        collection: 'posts',
+        type: 'posts',
         version: 1,
-        title: 'Hello World',
+        name: 'Hello World',
         body: 'This is a test document about search',
         tags: ['search', 'test'],
         locale: 'en',
       })
       await insertSearch(tx, {
-        ns: nsId,
+        ns,
         entity: 2,
-        collection: 'posts',
+        type: 'posts',
         version: 1,
-        title: 'Another Post',
+        name: 'Another Post',
         body: 'Different content entirely',
         tags: ['other'],
       })
     })
 
-    const result = await query<{ title: string }>(
+    const result = await query<{ name: string }>(
       pool,
-      `SELECT title FROM search WHERE ns = $1 ORDER BY entity`,
-      [nsId],
+      `SELECT name FROM search WHERE ns = $1 ORDER BY entity`,
+      [ns],
     )
     expect(result.rows).toHaveLength(2)
-    expect(result.rows[0].title).toBe('Hello World')
+    expect(result.rows[0].name).toBe('Hello World')
   })
 })
 
@@ -93,18 +89,18 @@ describe('vector search on data table', () => {
 
     await transaction(pool, async (tx) => {
       await insertData(tx, {
-        ns: nsId, collection: 'posts',
-        doc: { title: 'Doc A' }, rand: 1,
+        ns, id: 'wk-' + String(Math.random()).slice(2,8), type: 'posts',
+        data: { title: 'Doc A' }, rand: 1,
         embedding: emb1,
       })
       await insertData(tx, {
-        ns: nsId, collection: 'posts',
-        doc: { title: 'Doc B' }, rand: 2,
+        ns, id: 'wk-' + String(Math.random()).slice(2,8), type: 'posts',
+        data: { title: 'Doc B' }, rand: 2,
         embedding: emb2,
       })
       await insertData(tx, {
-        ns: nsId, collection: 'posts',
-        doc: { title: 'Doc C' }, rand: 3,
+        ns, id: 'wk-' + String(Math.random()).slice(2,8), type: 'posts',
+        data: { title: 'Doc C' }, rand: 3,
         embedding: emb3,
       })
     })
@@ -113,21 +109,21 @@ describe('vector search on data table', () => {
     const queryVec = new Array(dim).fill(0)
     queryVec[0] = 1
 
-    const result = await query<{ doc: Record<string, unknown>; score: number }>(
+    const result = await query<{ data: Record<string, unknown>; score: number }>(
       pool,
-      `SELECT doc, embedding <=> $1::vector AS score
+      `SELECT data, embedding <=> $1::vector AS score
        FROM data WHERE ns = $2 AND embedding IS NOT NULL
        ORDER BY score ASC LIMIT 3`,
-      [`[${queryVec.join(',')}]`, nsId],
+      [`[${queryVec.join(',')}]`, ns],
     )
 
     expect(result.rows).toHaveLength(3)
     // Doc A should be most similar (identical direction)
-    expect(result.rows[0].doc.title).toBe('Doc A')
+    expect(result.rows[0].data.title).toBe('Doc A')
     // Doc B should be second most similar
-    expect(result.rows[1].doc.title).toBe('Doc B')
+    expect(result.rows[1].data.title).toBe('Doc B')
     // Doc C should be least similar (orthogonal)
-    expect(result.rows[2].doc.title).toBe('Doc C')
+    expect(result.rows[2].data.title).toBe('Doc C')
   })
 })
 
@@ -136,19 +132,19 @@ describe('data → search indexing pipeline simulation', () => {
     // 1. Create data row (embedding starts as NULL)
     const dataRow = await transaction(pool, async (tx) => {
       return insertData(tx, {
-        ns: nsId, collection: 'posts',
-        doc: { title: 'Searchable Post', body: 'Deep content about AI' },
+        ns, id: 'wk-' + String(Math.random()).slice(2,8), type: 'posts',
+        data: { title: 'Searchable Post', body: 'Deep content about AI' },
         rand: 42,
       })
     })
 
     // 2. Poll for unindexed rows (like indexer does)
-    const unindexed = await query<{ id: number; collection: string }>(
+    const unindexed = await query<{ seq: number; type: string }>(
       pool,
-      `SELECT id, collection FROM data WHERE embedding IS NULL LIMIT 1`,
+      `SELECT seq, type FROM data WHERE embedding IS NULL AND type != 'namespaces' LIMIT 1`,
     )
     expect(unindexed.rows).toHaveLength(1)
-    expect(unindexed.rows[0].id).toBe(dataRow.id)
+    expect(unindexed.rows[0].seq).toBe(dataRow.seq)
 
     // 3. "Compute embedding" (mock - just a unit vector)
     const embedding = new Array(768).fill(0)
@@ -156,18 +152,18 @@ describe('data → search indexing pipeline simulation', () => {
 
     // 4. Update data.embedding
     await query(pool,
-      `UPDATE data SET embedding = $1::vector WHERE id = $2`,
-      [`[${embedding.join(',')}]`, dataRow.id],
+      `UPDATE data SET embedding = $1::vector WHERE seq = $2`,
+      [`[${embedding.join(',')}]`, dataRow.seq],
     )
 
     // 5. Write to search transit table
     await transaction(pool, async (tx) => {
       await insertSearch(tx, {
-        ns: nsId,
-        entity: dataRow.id,
-        collection: 'posts',
-        version: dataRow.id,
-        title: 'Searchable Post',
+        ns,
+        entity: dataRow.seq,
+        type: 'posts',
+        version: dataRow.seq,
+        name: 'Searchable Post',
         body: 'Deep content about AI',
         tags: ['ai', 'ml'],
       })
@@ -176,23 +172,23 @@ describe('data → search indexing pipeline simulation', () => {
     // Verify: data has embedding
     const data = await query<{ embedding: string }>(
       pool,
-      `SELECT embedding FROM data WHERE id = $1`,
-      [dataRow.id],
+      `SELECT embedding FROM data WHERE seq = $1`,
+      [dataRow.seq],
     )
     expect(data.rows[0].embedding).not.toBeNull()
 
     // Verify: search entry exists
-    const search = await query<{ title: string; tags: string[] }>(
+    const search = await query<{ name: string; tags: string[] }>(
       pool,
-      `SELECT title, tags FROM search WHERE ns = $1 AND entity = $2`,
-      [nsId, dataRow.id],
+      `SELECT name, tags FROM search WHERE ns = $1 AND entity = $2`,
+      [ns, dataRow.seq],
     )
     expect(search.rows).toHaveLength(1)
-    expect(search.rows[0].title).toBe('Searchable Post')
+    expect(search.rows[0].name).toBe('Searchable Post')
     expect(search.rows[0].tags).toContain('ai')
 
     // Verify: no more unindexed rows
-    const remaining = await query(pool, `SELECT id FROM data WHERE embedding IS NULL AND ns = $1`, [nsId])
+    const remaining = await query(pool, `SELECT seq FROM data WHERE embedding IS NULL AND ns = $1 AND type != 'namespaces'`, [ns])
     expect(remaining.rows).toHaveLength(0)
   })
 })

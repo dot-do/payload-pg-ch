@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest'
-import { getTestPool, setupTestSchema, cleanupTestData, teardownTestPool } from './setup.js'
+import { getTestPool, setupTestSchema, cleanupTestData, createTestNs, teardownTestPool } from './setup.js'
 import { query } from '../src/db/pg.js'
 import { NsResolver } from '../src/ns/resolver.js'
 import { createBranch, mergeBranch, cleanupBranch, cleanupExpiredPreviews } from '../src/ns/branch.js'
@@ -24,8 +24,8 @@ beforeEach(async () => {
 })
 
 describe('NsResolver', () => {
-  it('resolves by exact URI', async () => {
-    await query(pool, `INSERT INTO ns (uri, name, kind) VALUES ('acme.com', 'Acme', 'production')`)
+  it('resolves by exact ns string', async () => {
+    await createTestNs('acme.com', 'Acme')
     await resolver.refresh()
 
     const ns = resolver.resolve('acme.com')
@@ -34,9 +34,9 @@ describe('NsResolver', () => {
   })
 
   it('longest prefix match with subpath', async () => {
-    await query(pool, `INSERT INTO ns (uri, name, kind) VALUES ('acme.com', 'Root', 'production')`)
-    await query(pool, `INSERT INTO ns (uri, name, kind) VALUES ('acme.com/docs', 'Docs', 'production')`)
-    await query(pool, `INSERT INTO ns (uri, name, kind) VALUES ('acme.com/docs/v2', 'Docs V2', 'production')`)
+    await createTestNs('acme.com', 'Root')
+    await createTestNs('acme.com/docs', 'Docs')
+    await createTestNs('acme.com/docs/v2', 'Docs V2')
     await resolver.refresh()
 
     expect(resolver.resolve('acme.com', '/')!.name).toBe('Root')
@@ -50,33 +50,28 @@ describe('NsResolver', () => {
     expect(resolver.resolve('unknown.com')).toBeNull()
   })
 
-  it('getById returns correct ns', async () => {
-    const result = await query<{ id: number }>(
-      pool,
-      `INSERT INTO ns (uri, name, kind) VALUES ('test.com', 'Test', 'production') RETURNING id`,
-    )
+  it('getByNs returns correct ns', async () => {
+    await createTestNs('test.com', 'Test')
     await resolver.refresh()
 
-    const ns = resolver.getById(result.rows[0].id)
+    const ns = resolver.getByNs('test.com')
     expect(ns).not.toBeNull()
-    expect(ns!.uri).toBe('test.com')
+    expect(ns!.ns).toBe('test.com')
   })
 
-  it('getAllByParent returns child namespaces', async () => {
-    const parent = await query<{ id: number }>(
-      pool,
-      `INSERT INTO ns (uri, name, kind) VALUES ('parent.com', 'Parent', 'production') RETURNING id`,
-    )
-    await query(pool, `INSERT INTO ns (uri, name, kind, parent) VALUES ('parent.com/pr/1', 'PR1', 'preview', $1)`, [parent.rows[0].id])
-    await query(pool, `INSERT INTO ns (uri, name, kind, parent) VALUES ('parent.com/pr/2', 'PR2', 'preview', $1)`, [parent.rows[0].id])
+  it('getAllChildren returns child namespaces', async () => {
+    await createTestNs('parent.com', 'Parent')
+    // Create child branch namespaces with _parent in meta
+    await createBranch(pool, { parentNs: 'parent.com', ns: 'parent.com/pr/1', name: 'PR1', kind: 'preview' })
+    await createBranch(pool, { parentNs: 'parent.com', ns: 'parent.com/pr/2', name: 'PR2', kind: 'preview' })
     await resolver.refresh()
 
-    const children = resolver.getAllByParent(parent.rows[0].id)
+    const children = resolver.getAllChildren('parent.com')
     expect(children).toHaveLength(2)
   })
 
   it('resolveFromRequest extracts host and path', async () => {
-    await query(pool, `INSERT INTO ns (uri, name, kind) VALUES ('app.local', 'App', 'production')`)
+    await createTestNs('app.local', 'App')
     await resolver.refresh()
 
     const ns = resolver.resolveFromRequest({
@@ -84,127 +79,134 @@ describe('NsResolver', () => {
       url: '/api/posts',
     })
     expect(ns).not.toBeNull()
-    expect(ns!.uri).toBe('app.local')
+    expect(ns!.ns).toBe('app.local')
   })
 })
 
 describe('branch lifecycle', () => {
-  let parentNsId: number
+  let parentNs: string
 
   beforeEach(async () => {
-    const result = await query<{ id: number }>(
-      pool,
-      `INSERT INTO ns (uri, name, kind, repo, branch, root)
-       VALUES ('prod.com', 'Production', 'production', 'org/repo', 'main', '/')
-       RETURNING id`,
-    )
-    parentNsId = result.rows[0].id
+    parentNs = await createTestNs('prod.com', 'Production')
   })
 
   it('createBranch creates child namespace', async () => {
     const branch = await createBranch(pool, {
-      parent: parentNsId,
-      uri: 'prod.com/pr/42',
+      parentNs,
+      ns: 'prod.com/pr/42',
       name: 'PR #42',
       branch: 'feat/hero',
       kind: 'preview',
       ttl: '7 days',
       pr: 42,
-      repo: 'org/repo',
-      root: '/',
     })
 
-    expect(branch.id).toBeGreaterThan(0)
-    expect(branch.parent).toBe(parentNsId)
-    expect(branch.kind).toBe('preview')
-    expect(branch.pr).toBe(42)
+    expect(branch.seq).toBeGreaterThan(0)
+    const meta = branch.meta as Record<string, unknown>
+    expect(meta._parent).toBe(parentNs)
+    expect(meta.kind).toBe('preview')
+    expect(meta.pr).toBe(42)
   })
 
   it('mergeBranch copies changes to parent', async () => {
     const branch = await createBranch(pool, {
-      parent: parentNsId,
-      uri: 'prod.com/pr/99',
+      parentNs,
+      ns: 'prod.com/pr/99',
       branch: 'feat/merge-test',
     })
+    await resolver.refresh()
 
     // Insert a doc in parent
-    const parentDoc = await query<{ id: number }>(
+    await query(
       pool,
-      `INSERT INTO data (ns, collection, doc, rand) VALUES ($1, 'posts', '{"title":"Original"}', 111) RETURNING id`,
-      [parentNsId],
+      `INSERT INTO data (ns, type, id, data, rand) VALUES ($1, 'posts', 'parent-doc-1', '{"title":"Original"}', 111)`,
+      [parentNs],
+    )
+
+    // Get parent doc seq
+    const parentDoc = await query<{ seq: number }>(
+      pool,
+      `SELECT seq FROM data WHERE ns = $1 AND id = 'parent-doc-1'`,
+      [parentNs],
     )
 
     // Fork into branch with modification
     await query(
       pool,
-      `INSERT INTO data (ns, collection, doc, rand)
-       VALUES ($1, 'posts', $2, 111)`,
-      [branch.id, JSON.stringify({ title: 'Modified', _parent: parentDoc.rows[0].id })],
+      `INSERT INTO data (ns, type, id, data, meta, rand)
+       VALUES ($1, 'posts', 'fork-doc-1', $2, $3, 111)`,
+      [branch.ns, JSON.stringify({ title: 'Modified' }), JSON.stringify({ _parent: parentDoc.rows[0].seq })],
     )
 
-    const result = await mergeBranch(pool, branch.id)
+    const result = await mergeBranch(pool, branch.ns)
     expect(result.merged).toBe(1)
 
     // Parent doc should now have the modified title
-    const updated = await query<{ doc: Record<string, unknown> }>(
+    const updated = await query<{ data: Record<string, unknown> }>(
       pool,
-      `SELECT doc FROM data WHERE id = $1`,
-      [parentDoc.rows[0].id],
+      `SELECT data FROM data WHERE seq = $1`,
+      [parentDoc.rows[0].seq],
     )
-    expect(updated.rows[0].doc.title).toBe('Modified')
+    expect(updated.rows[0].data.title).toBe('Modified')
   })
 
   it('mergeBranch handles tombstones', async () => {
     const branch = await createBranch(pool, {
-      parent: parentNsId,
-      uri: 'prod.com/pr/100',
+      parentNs,
+      ns: 'prod.com/pr/100',
       branch: 'feat/delete-test',
     })
 
     // Insert a doc in parent
-    const parentDoc = await query<{ id: number }>(
+    await query(
       pool,
-      `INSERT INTO data (ns, collection, doc, rand) VALUES ($1, 'posts', '{"title":"Delete Me"}', 222) RETURNING id`,
-      [parentNsId],
+      `INSERT INTO data (ns, type, id, data, rand) VALUES ($1, 'posts', 'del-doc-1', '{"title":"Delete Me"}', 222)`,
+      [parentNs],
+    )
+
+    const parentDoc = await query<{ seq: number }>(
+      pool,
+      `SELECT seq FROM data WHERE ns = $1 AND id = 'del-doc-1'`,
+      [parentNs],
     )
 
     // Create tombstone in branch
     await query(
       pool,
-      `INSERT INTO data (ns, collection, doc, rand) VALUES ($1, '_tombstone', $2, 0)`,
-      [branch.id, JSON.stringify({ _parent: parentDoc.rows[0].id, _deleted: true })],
+      `INSERT INTO data (ns, type, id, data, meta, rand) VALUES ($1, '_tombstone', $2, '{}', $3, 0)`,
+      [branch.ns, `_tomb_${parentDoc.rows[0].seq}`, JSON.stringify({ _parent: parentDoc.rows[0].seq, _deleted: true })],
     )
 
-    const result = await mergeBranch(pool, branch.id)
+    const result = await mergeBranch(pool, branch.ns)
     expect(result.deleted).toBe(1)
 
     // Parent doc should be gone
     const remaining = await query(
       pool,
-      `SELECT id FROM data WHERE id = $1`,
-      [parentDoc.rows[0].id],
+      `SELECT seq FROM data WHERE seq = $1`,
+      [parentDoc.rows[0].seq],
     )
     expect(remaining.rows).toHaveLength(0)
   })
 
   it('cleanupBranch removes all branch data', async () => {
     const branch = await createBranch(pool, {
-      parent: parentNsId,
-      uri: 'prod.com/pr/101',
+      parentNs,
+      ns: 'prod.com/pr/101',
       branch: 'feat/cleanup-test',
     })
 
     await query(pool,
-      `INSERT INTO data (ns, collection, doc, rand) VALUES ($1, 'posts', '{"title":"Branch Doc"}', 333)`,
-      [branch.id],
+      `INSERT INTO data (ns, type, id, data, rand) VALUES ($1, 'posts', 'branch-doc-1', '{"title":"Branch Doc"}', 333)`,
+      [branch.ns],
     )
 
-    await cleanupBranch(pool, branch.id)
+    await cleanupBranch(pool, branch.ns)
 
-    const ns = await query(pool, `SELECT id FROM ns WHERE id = $1`, [branch.id])
-    expect(ns.rows).toHaveLength(0)
+    const nsDoc = await query(pool, `SELECT seq FROM data WHERE ns = $1 AND type = 'namespaces'`, [branch.ns])
+    expect(nsDoc.rows).toHaveLength(0)
 
-    const data = await query(pool, `SELECT id FROM data WHERE ns = $1`, [branch.id])
+    const data = await query(pool, `SELECT seq FROM data WHERE ns = $1`, [branch.ns])
     expect(data.rows).toHaveLength(0)
   })
 
@@ -212,24 +214,24 @@ describe('branch lifecycle', () => {
     // Create an expired preview (ttl in the past)
     await query(
       pool,
-      `INSERT INTO ns (uri, name, kind, parent, ttl, created)
-       VALUES ('prod.com/pr/expired', 'Expired', 'preview', $1, '1 second', now() - interval '1 hour')`,
-      [parentNsId],
+      `INSERT INTO data (ns, type, id, name, data, meta, rand, created)
+       VALUES ('prod.com/pr/expired', 'namespaces', 'prod.com/pr/expired', 'Expired', '{}', $1, 0, now() - interval '1 hour')`,
+      [JSON.stringify({ _parent: parentNs, kind: 'preview', ttl: '1 second' })],
     )
 
     // Create a non-expired preview
     await query(
       pool,
-      `INSERT INTO ns (uri, name, kind, parent, ttl)
-       VALUES ('prod.com/pr/fresh', 'Fresh', 'preview', $1, '7 days')`,
-      [parentNsId],
+      `INSERT INTO data (ns, type, id, name, data, meta, rand)
+       VALUES ('prod.com/pr/fresh', 'namespaces', 'prod.com/pr/fresh', 'Fresh', '{}', $1, 0)`,
+      [JSON.stringify({ _parent: parentNs, kind: 'preview', ttl: '7 days' })],
     )
 
     const cleaned = await cleanupExpiredPreviews(pool)
     expect(cleaned).toBe(1)
 
     // Fresh preview should still exist
-    const remaining = await query(pool, `SELECT uri FROM ns WHERE kind = 'preview'`)
+    const remaining = await query(pool, `SELECT ns FROM data WHERE type = 'namespaces' AND meta->>'kind' = 'preview'`)
     expect(remaining.rows).toHaveLength(1)
   })
 })

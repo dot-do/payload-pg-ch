@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest'
-import { getTestPool, setupTestSchema, cleanupTestData, teardownTestPool } from './setup.js'
+import { getTestPool, setupTestSchema, cleanupTestData, createTestNs, teardownTestPool } from './setup.js'
 import { query, transaction } from '../src/db/pg.js'
 import { insertSearch, searchByEmbedding } from '../src/db/queries/search.js'
 import { dropOldLogPartitions } from '../src/workers/retention.js'
@@ -9,7 +9,7 @@ import { eventsCollection, versionsCollection, usersCollection, nsCollection } f
 import type pg from 'pg'
 
 let pool: pg.Pool
-let nsId: number
+let ns: string
 
 beforeAll(async () => {
   pool = getTestPool() as unknown as pg.Pool
@@ -22,11 +22,7 @@ afterAll(async () => {
 
 beforeEach(async () => {
   await cleanupTestData()
-  const result = await query<{ id: number }>(
-    pool,
-    `INSERT INTO ns (uri, name, kind) VALUES ('search-emb.test', 'Test', 'production') RETURNING id`,
-  )
-  nsId = result.rows[0].id
+  ns = await createTestNs('search-emb.test', 'Test')
 })
 
 describe('searchByEmbedding', () => {
@@ -37,24 +33,24 @@ describe('searchByEmbedding', () => {
 
     await transaction(pool, async (tx) => {
       await insertSearch(tx, {
-        ns: nsId, entity: 1, collection: 'posts', version: 1,
-        title: 'Similar', embedding: emb1,
+        ns, entity: 1, type: 'posts', version: 1,
+        name: 'Similar', embedding: emb1,
       })
       await insertSearch(tx, {
-        ns: nsId, entity: 2, collection: 'posts', version: 1,
-        title: 'Different', embedding: emb2,
+        ns, entity: 2, type: 'posts', version: 1,
+        name: 'Different', embedding: emb2,
       })
     })
 
     const results = await searchByEmbedding(pool, {
-      ns: nsId,
+      ns,
       embedding: emb1,
       limit: 2,
     })
 
     expect(results.rows).toHaveLength(2)
     expect(results.scores[0]).toBeLessThanOrEqual(results.scores[1])
-    expect(results.rows[0].title).toBe('Similar')
+    expect(results.rows[0].name).toBe('Similar')
   })
 
   it('filters by collection', async () => {
@@ -63,24 +59,24 @@ describe('searchByEmbedding', () => {
 
     await transaction(pool, async (tx) => {
       await insertSearch(tx, {
-        ns: nsId, entity: 1, collection: 'posts', version: 1,
-        title: 'Post', embedding: emb,
+        ns, entity: 1, type: 'posts', version: 1,
+        name: 'Post', embedding: emb,
       })
       await insertSearch(tx, {
-        ns: nsId, entity: 2, collection: 'pages', version: 1,
-        title: 'Page', embedding: emb,
+        ns, entity: 2, type: 'pages', version: 1,
+        name: 'Page', embedding: emb,
       })
     })
 
     const results = await searchByEmbedding(pool, {
-      ns: nsId,
-      collection: 'posts',
+      ns,
+      type: 'posts',
       embedding: emb,
       limit: 10,
     })
 
     expect(results.rows).toHaveLength(1)
-    expect(results.rows[0].title).toBe('Post')
+    expect(results.rows[0].name).toBe('Post')
   })
 })
 
@@ -104,7 +100,7 @@ describe('payload hooks', () => {
     })
 
     expect(ctx.ns).not.toBeUndefined()
-    expect(ctx.ns!.id).toBe(nsId)
+    expect(ctx.ns!.seq).toBe(ns)
 
     resolver.stop()
   })

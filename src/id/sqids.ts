@@ -3,10 +3,11 @@ import Sqids from 'sqids'
 // Default alphabet — matches ClickHouse's sqidEncode/sqidDecode
 const sqids = new Sqids({ minLength: 10 })
 
-// Collection slug → 3-char prefix registry
+// Type slug → 3-char prefix registry
 const PREFIXES: Record<string, string> = {
   // Core
   nouns: 'nou', verbs: 'vrb', things: 'thn', 'action-defs': 'acd',
+  namespaces: 'nsp',
   // Chat
   chats: 'cht', messages: 'msg', votes: 'vot', documents: 'doc',
   suggestions: 'sug', streams: 'stm',
@@ -39,39 +40,53 @@ const PREFIXES: Record<string, string> = {
   categories: 'cat', tags: 'tag', actions: 'act',
 }
 
-export function registerPrefix(collection: string, prefix: string): void {
-  PREFIXES[collection] = prefix
+export function registerPrefix(type: string, prefix: string): void {
+  PREFIXES[type] = prefix
 }
 
-export function getPrefix(collection: string): string {
-  if (PREFIXES[collection]) return PREFIXES[collection]
-  // For internal collections like _versions_posts, derive from the base collection
-  if (collection.startsWith('_versions_')) {
-    const base = collection.slice('_versions_'.length)
+export function getPrefix(type: string): string {
+  if (PREFIXES[type]) return PREFIXES[type]
+  // For internal types like _versions_posts, derive from the base type
+  if (type.startsWith('_versions_')) {
+    const base = type.slice('_versions_'.length)
     const basePrefix = PREFIXES[base] ?? base.replace(/[^a-z]/g, '').slice(0, 3)
-    return `v${basePrefix.slice(0, 2)}`  // e.g., _versions_posts -> vpo, _versions_categories -> vca
+    return `v${basePrefix.slice(0, 2)}`  // e.g., _versions_posts -> vpo
   }
   // Strip leading underscores for prefix derivation
-  const clean = collection.replace(/^_+/, '')
+  const clean = type.replace(/^_+/, '')
   return clean.slice(0, 3) || 'doc'
 }
 
+/**
+ * Hash a namespace string to a non-negative integer for sqid encoding.
+ */
+export function hashNs(ns: string): number {
+  let hash = 0
+  for (let i = 0; i < ns.length; i++) {
+    const ch = ns.charCodeAt(i)
+    hash = ((hash << 5) - hash + ch) | 0
+  }
+  // Ensure non-negative
+  return hash >>> 0
+}
+
 export function toSqid(
-  collection: string,
-  id: number,
-  ns: number,
+  type: string,
+  seq: number,
+  ns: string,
   created: Date,
   rand: number,
 ): string {
-  const prefix = getPrefix(collection)
+  const prefix = getPrefix(type)
+  const nsHash = hashNs(ns)
   const epoch = Math.floor(created.getTime() / 1000)
-  return `${prefix}_${sqids.encode([ns, id, epoch, rand])}`
+  return `${prefix}_${sqids.encode([nsHash, seq, epoch, rand])}`
 }
 
 export function fromSqid(sqid: string): {
   prefix: string
-  ns: number
-  id: number
+  nsHash: number
+  seq: number
   epoch: number
   rand: number
 } {
@@ -85,15 +100,15 @@ export function fromSqid(sqid: string): {
   if (decoded.length < 4) {
     throw new Error(`Invalid sqid: expected 4 components, got ${decoded.length}`)
   }
-  const [ns, id, epoch, rand] = decoded
+  const [nsHash, seq, epoch, rand] = decoded
 
   // Canonicality check: re-encode and compare
-  const reencoded = sqids.encode([ns, id, epoch, rand])
+  const reencoded = sqids.encode([nsHash, seq, epoch, rand])
   if (reencoded !== encoded) {
     throw new Error(`Invalid sqid: non-canonical encoding`)
   }
 
-  return { prefix, ns, id, epoch, rand }
+  return { prefix, nsHash, seq, epoch, rand }
 }
 
 export function generateRand(): number {

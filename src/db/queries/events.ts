@@ -4,15 +4,15 @@ import { query } from '../pg.js'
 
 /**
  * Emit a non-mutation event (page view, search query, auth event, etc.)
- * Mutation events are captured by CDC on the data table — no duplication.
+ * Mutation events are captured by CDC on the data table -- no duplication.
  */
 export async function emit(
   pool: PgPool,
   args: {
-    ns: number
+    ns: string
     kind: string
     entity?: number | null
-    collection?: string | null
+    type?: string | null
     actor?: number | null
     data?: unknown
     meta?: unknown
@@ -20,14 +20,14 @@ export async function emit(
 ): Promise<EventRow> {
   const result = await query<EventRow>(
     pool,
-    `INSERT INTO events (ns, kind, entity, collection, actor, data, meta)
+    `INSERT INTO events (ns, kind, entity, type, actor, data, meta)
      VALUES ($1, $2, $3, $4, $5, $6, $7)
      RETURNING *`,
     [
       args.ns,
       args.kind,
       args.entity ?? null,
-      args.collection ?? null,
+      args.type ?? null,
       args.actor ?? null,
       args.data ? JSON.stringify(args.data) : null,
       args.meta ? JSON.stringify(args.meta) : null,
@@ -39,7 +39,7 @@ export async function emit(
 export async function findEvents(
   pool: PgPool,
   args: {
-    ns: number
+    ns: string
     kind?: string
     entity?: number
     limit?: number

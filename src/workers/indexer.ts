@@ -9,10 +9,10 @@ export interface IndexerConfig {
 }
 
 interface UnindexedRow {
-  id: number
-  ns: number
-  collection: string
-  doc: unknown
+  seq: number
+  ns: string
+  type: string
+  data: unknown
 }
 
 export async function runIndexerOnce(
@@ -25,7 +25,7 @@ export async function runIndexerOnce(
   const rows = await transaction(pool, async (tx) => {
     const result = await query<UnindexedRow>(
       tx,
-      `SELECT id, ns, collection, doc FROM data WHERE embedding IS NULL LIMIT $1 FOR UPDATE SKIP LOCKED`,
+      `SELECT seq, ns, type, data FROM data WHERE embedding IS NULL LIMIT $1 FOR UPDATE SKIP LOCKED`,
       [batchSize],
     )
     return result.rows
@@ -33,16 +33,16 @@ export async function runIndexerOnce(
 
   for (const row of rows) {
     try {
-      const doc = typeof row.doc === 'string' ? JSON.parse(row.doc) : row.doc as Record<string, unknown>
-      const title = (doc.title as string) ?? null
+      const doc = typeof row.data === 'string' ? JSON.parse(row.data) : row.data as Record<string, unknown>
+      const title = (doc.title as string) ?? (doc.name as string) ?? null
       const body = (doc.body as string) ?? null
       const text = [title, body].filter(Boolean).join('\n')
       if (!text) {
         // No text to embed — write a zero vector so we skip it next poll
         const zeroes = new Array(768).fill(0)
-        await query(pool, `UPDATE data SET embedding = $1 WHERE id = $2`, [
+        await query(pool, `UPDATE data SET embedding = $1 WHERE seq = $2`, [
           `[${zeroes.join(',')}]`,
-          row.id,
+          row.seq,
         ])
         continue
       }
@@ -54,19 +54,19 @@ export async function runIndexerOnce(
       const embedding768 = truncateAndNormalize(embedding3072, 768)
 
       // Update data.embedding with 768d
-      await query(pool, `UPDATE data SET embedding = $1 WHERE id = $2`, [
+      await query(pool, `UPDATE data SET embedding = $1 WHERE seq = $2`, [
         `[${embedding768.join(',')}]`,
-        row.id,
+        row.seq,
       ])
 
       // Write to search transit table (CDC streams to ClickHouse)
       await transaction(pool, async (tx) => {
         await insertSearch(tx, {
           ns: row.ns,
-          entity: row.id,
-          collection: row.collection,
-          version: row.id,
-          title,
+          entity: row.seq,
+          type: row.type,
+          version: row.seq,
+          name: title,
           body,
           tags: [],
           embedding: embedding3072,
@@ -75,7 +75,7 @@ export async function runIndexerOnce(
 
       processed++
     } catch (err) {
-      console.error(`Indexer failed for data row ${row.id}:`, err)
+      console.error(`Indexer failed for data row seq=${row.seq}:`, err)
     }
   }
 

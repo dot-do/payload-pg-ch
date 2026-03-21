@@ -1,5 +1,5 @@
 import type { PgPool } from '../../db/pg.js'
-import type { NsRow } from '../../types.js'
+import type { DataRow } from '../../types.js'
 import { query } from '../../db/pg.js'
 
 export interface GitHubSyncConfig {
@@ -8,18 +8,22 @@ export interface GitHubSyncConfig {
 
 export async function pullFromGitHub(
   pool: PgPool,
-  ns: NsRow,
+  nsDoc: DataRow,
   config: GitHubSyncConfig,
 ): Promise<{ commit: string; changed: number }> {
-  if (!ns.repo) throw new Error(`No repo configured for ns ${ns.id}`)
+  const meta = nsDoc.meta as Record<string, unknown> | null
+  if (!meta?.repo) throw new Error(`No repo configured for ns ${nsDoc.ns}`)
 
-  const since = ns.commit ?? ''
-  const [owner, repo] = ns.repo.split('/')
+  const repo = meta.repo as string
+  const branch = (meta.branch as string) ?? 'main'
+  const root = (meta.root as string) ?? '/'
+  const since = (meta.commit as string) ?? ''
+  const [owner, repoName] = repo.split('/')
 
   // Fetch commits since last sync
   const url = since
-    ? `https://api.github.com/repos/${owner}/${repo}/compare/${since}...${ns.branch}`
-    : `https://api.github.com/repos/${owner}/${repo}/commits?sha=${ns.branch}&per_page=1`
+    ? `https://api.github.com/repos/${owner}/${repoName}/compare/${since}...${branch}`
+    : `https://api.github.com/repos/${owner}/${repoName}/commits?sha=${branch}&per_page=1`
 
   const response = await fetch(url, {
     headers: {
@@ -37,7 +41,7 @@ export async function pullFromGitHub(
     files?: Array<{ filename: string; status: string; raw_url: string }>
   } | Array<{ sha: string }>
 
-  let latestCommit = ns.commit ?? ''
+  let latestCommit = since
   let changed = 0
 
   if (Array.isArray(data)) {
@@ -48,14 +52,14 @@ export async function pullFromGitHub(
     latestCommit = data.commits?.[data.commits.length - 1]?.sha ?? latestCommit
 
     for (const file of data.files) {
-      // Only process files under ns.root
-      if (!file.filename.startsWith(ns.root.replace(/^\//, ''))) continue
+      // Only process files under root
+      if (!file.filename.startsWith(root.replace(/^\//, ''))) continue
 
       if (file.status === 'removed') {
         // Delete from data table
         await query(pool,
           `DELETE FROM data WHERE ns = $1 AND slug = $2`,
-          [ns.id, file.filename],
+          [nsDoc.ns, file.filename],
         )
       } else {
         // Fetch file content
@@ -67,21 +71,21 @@ export async function pullFromGitHub(
         // Parse content and upsert
         const doc = parseFileContent(file.filename, content)
         const existing = await query(pool,
-          `SELECT id FROM data WHERE ns = $1 AND slug = $2`,
-          [ns.id, file.filename],
+          `SELECT seq FROM data WHERE ns = $1 AND slug = $2`,
+          [nsDoc.ns, file.filename],
         )
 
         if (existing.rows.length > 0) {
           await query(pool,
-            `UPDATE data SET doc = $1, updated = now() WHERE ns = $2 AND slug = $3`,
-            [JSON.stringify(doc), ns.id, file.filename],
+            `UPDATE data SET data = $1, updated = now() WHERE ns = $2 AND slug = $3`,
+            [JSON.stringify(doc), nsDoc.ns, file.filename],
           )
         } else {
           const rand = crypto.getRandomValues(new Uint16Array(1))[0]
           await query(pool,
-            `INSERT INTO data (ns, collection, slug, doc, rand)
+            `INSERT INTO data (ns, type, slug, data, rand)
              VALUES ($1, $2, $3, $4, $5)`,
-            [ns.id, inferCollection(file.filename), file.filename, JSON.stringify(doc), rand],
+            [nsDoc.ns, inferType(file.filename), file.filename, JSON.stringify(doc), rand],
           )
         }
       }
@@ -89,10 +93,11 @@ export async function pullFromGitHub(
     }
   }
 
-  // Update ns sync state
+  // Update namespace doc sync state
   await query(pool,
-    `UPDATE ns SET commit = $1, synced = now(), updated = now() WHERE id = $2`,
-    [latestCommit, ns.id],
+    `UPDATE data SET meta = meta::jsonb || $1::jsonb, updated = now()
+     WHERE type = 'namespaces' AND ns = $2`,
+    [JSON.stringify({ commit: latestCommit, synced: new Date().toISOString() }), nsDoc.ns],
   )
 
   return { commit: latestCommit, changed }
@@ -100,10 +105,11 @@ export async function pullFromGitHub(
 
 export async function pushToGitHub(
   _pool: PgPool,
-  ns: NsRow,
+  nsDoc: DataRow,
   _config: GitHubSyncConfig,
 ): Promise<{ commit: string; changed: number }> {
-  if (!ns.repo) throw new Error(`No repo configured for ns ${ns.id}`)
+  const meta = nsDoc.meta as Record<string, unknown> | null
+  if (!meta?.repo) throw new Error(`No repo configured for ns ${nsDoc.ns}`)
 
   // TODO: Implement push logic
   // 1. Query modified docs since last sync
@@ -142,7 +148,7 @@ function parseFrontmatter(raw: string): Record<string, unknown> {
   return result
 }
 
-function inferCollection(filename: string): string {
+function inferType(filename: string): string {
   const parts = filename.split('/')
   if (parts.length >= 2) return parts[0]
   return 'pages'

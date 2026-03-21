@@ -2,7 +2,7 @@
  * Phase 2 TDD tests: Chat, Agents, Issues, Cost Events, Dynamic Nouns
  */
 import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest'
-import { getTestPool, setupTestSchema, cleanupTestData, teardownTestPool } from './setup.js'
+import { getTestPool, setupTestSchema, cleanupTestData, createTestNs, teardownTestPool } from './setup.js'
 import { DocumentAdapter } from '../src/adapter.js'
 import { fromSqid } from '../src/id/sqids.js'
 import { query, transaction } from '../src/db/pg.js'
@@ -69,7 +69,7 @@ const COLLECTIONS = [
 
 let adapter: DocumentAdapter
 let pool: pg.Pool
-let nsId: number
+let ns: string
 
 beforeAll(async () => {
   pool = getTestPool() as unknown as pg.Pool
@@ -87,11 +87,7 @@ afterAll(async () => {
 
 beforeEach(async () => {
   await cleanupTestData()
-  const result = await query<{ id: number }>(
-    pool,
-    `INSERT INTO ns (uri, name, kind) VALUES ('phase2.test', 'Phase2', 'production') RETURNING id`,
-  )
-  nsId = result.rows[0].id
+  ns = await createTestNs('phase2.test', 'Phase2')
   await adapter.nsResolver.refresh()
 })
 
@@ -100,22 +96,22 @@ beforeEach(async () => {
 // ============================================================
 describe('Chat + Message CRUD', () => {
   it('creates chat and messages with typed parts', async () => {
-    const user = await adapter.create({ ns: nsId, collection: 'users', data: { email: 'test@test.com', name: 'Test' } })
-    const userId = fromSqid(user.id).id
+    const user = await adapter.create({ ns, type: 'users', data: { email: 'test@test.com', name: 'Test' } })
+    const userId = fromSqid(user.id).seq
 
     const chat = await adapter.create({
-      ns: nsId,
-      collection: 'chats',
+      ns,
+      type: 'chats',
       data: { title: 'Test Chat', user: userId },
     })
     expect(chat.id).toMatch(/^cht_/)
 
-    const chatId = fromSqid(chat.id).id
+    const chatId = fromSqid(chat.id).seq
 
     // User message with text part
     const msg1 = await adapter.create({
-      ns: nsId,
-      collection: 'messages',
+      ns,
+      type: 'messages',
       data: {
         chat: chatId,
         role: 'user',
@@ -126,8 +122,8 @@ describe('Chat + Message CRUD', () => {
 
     // Assistant message with text + tool-call + tool-result
     const msg2 = await adapter.create({
-      ns: nsId,
-      collection: 'messages',
+      ns,
+      type: 'messages',
       data: {
         chat: chatId,
         role: 'assistant',
@@ -140,11 +136,11 @@ describe('Chat + Message CRUD', () => {
     })
 
     // Find messages by chat
-    const messages = await adapter.find({ ns: nsId, collection: 'messages' })
+    const messages = await adapter.find({ ns, type: 'messages' })
     expect(messages.total).toBe(2)
 
     // Verify parts round-trip fidelity
-    const found = await adapter.findOne({ ns: nsId, collection: 'messages', id: msg2.id })
+    const found = await adapter.findOne({ ns, type: 'messages', id: msg2.id })
     const parts = found!.parts as Array<{ type: string }>
     expect(parts).toHaveLength(3)
     expect(parts[0].type).toBe('tool-call')
@@ -156,12 +152,12 @@ describe('Chat + Message CRUD', () => {
   })
 
   it('message with file and reasoning parts', async () => {
-    const chat = await adapter.create({ ns: nsId, collection: 'chats', data: { title: 'File Chat' } })
-    const chatId = fromSqid(chat.id).id
+    const chat = await adapter.create({ ns, type: 'chats', data: { title: 'File Chat' } })
+    const chatId = fromSqid(chat.id).seq
 
     const msg = await adapter.create({
-      ns: nsId,
-      collection: 'messages',
+      ns,
+      type: 'messages',
       data: {
         chat: chatId,
         role: 'assistant',
@@ -173,7 +169,7 @@ describe('Chat + Message CRUD', () => {
       },
     })
 
-    const found = await adapter.findOne({ ns: nsId, collection: 'messages', id: msg.id })
+    const found = await adapter.findOne({ ns, type: 'messages', id: msg.id })
     const parts = found!.parts as Array<Record<string, unknown>>
     expect(parts[0].type).toBe('reasoning')
     expect(parts[0].reasoning).toBe('Let me think about this...')
@@ -186,28 +182,28 @@ describe('Chat + Message CRUD', () => {
 // ============================================================
 describe('Unified agent model', () => {
   it('creates agent with model, prompts, tools, sub-agents', async () => {
-    const model = await adapter.create({ ns: nsId, collection: 'models', data: { name: 'Claude 4', modelId: 'claude-sonnet-4-6', provider: 'anthropic' } })
-    const prompt = await adapter.create({ ns: nsId, collection: 'prompts', data: { name: 'System', template: 'You are helpful.' } })
-    const fn = await adapter.create({ ns: nsId, collection: 'functions', data: { name: 'search', slug: 'search' } })
-    const tool = await adapter.create({ ns: nsId, collection: 'tools', data: { name: 'Web Search', function: fromSqid(fn.id).id, inputSchema: { type: 'object' } } })
+    const model = await adapter.create({ ns, type: 'models', data: { name: 'Claude 4', modelId: 'claude-sonnet-4-6', provider: 'anthropic' } })
+    const prompt = await adapter.create({ ns, type: 'prompts', data: { name: 'System', template: 'You are helpful.' } })
+    const fn = await adapter.create({ ns, type: 'functions', data: { name: 'search', slug: 'search' } })
+    const tool = await adapter.create({ ns, type: 'tools', data: { name: 'Web Search', function: fromSqid(fn.id).seq, inputSchema: { type: 'object' } } })
 
     // Create sub-agent first
     const subAgent = await adapter.create({
-      ns: nsId,
-      collection: 'agents',
+      ns,
+      type: 'agents',
       data: { name: 'Research Sub', slug: 'research-sub' },
     })
 
     const agent = await adapter.create({
-      ns: nsId,
-      collection: 'agents',
+      ns,
+      type: 'agents',
       data: {
         name: 'Research Agent',
         slug: 'research',
-        model: fromSqid(model.id).id,
-        prompts: [fromSqid(prompt.id).id],
-        tools: [fromSqid(tool.id).id],
-        subAgents: [fromSqid(subAgent.id).id],
+        model: fromSqid(model.id).seq,
+        prompts: [fromSqid(prompt.id).seq],
+        tools: [fromSqid(tool.id).seq],
+        subAgents: [fromSqid(subAgent.id).seq],
         config: { temperature: 0.7, maxTokens: 4096 },
         permissions: { allow: ['read.*', 'write.code'], deny: ['write.finance'] },
       },
@@ -216,7 +212,7 @@ describe('Unified agent model', () => {
     expect(agent.id).toMatch(/^agt_/)
 
     // Verify full relationship graph
-    const found = await adapter.findOne({ ns: nsId, collection: 'agents', id: agent.id })
+    const found = await adapter.findOne({ ns, type: 'agents', id: agent.id })
     expect(found!.model).toBe(model.id)
     expect((found!.prompts as string[])[0]).toBe(prompt.id)
     expect((found!.tools as string[])[0]).toBe(tool.id)
@@ -228,7 +224,7 @@ describe('Unified agent model', () => {
     const rels = await query<{ path: string }>(
       pool,
       `SELECT path FROM rels WHERE "from" = $1 ORDER BY path`,
-      [fromSqid(agent.id).id],
+      [fromSqid(agent.id).seq],
     )
     expect(rels.rows.map(r => r.path)).toEqual(['model', 'prompts.0', 'subAgents.0', 'tools.0'])
   })
@@ -239,25 +235,25 @@ describe('Unified agent model', () => {
 // ============================================================
 describe('Agent-runs lifecycle', () => {
   it('full agent-run lifecycle: create → dequeue → checkpoint → complete', async () => {
-    const agent = await adapter.create({ ns: nsId, collection: 'agents', data: { name: 'Test Agent', slug: 'test' } })
+    const agent = await adapter.create({ ns, type: 'agents', data: { name: 'Test Agent', slug: 'test' } })
 
     const run = await adapter.create({
-      ns: nsId,
-      collection: 'agent-runs',
+      ns,
+      type: 'agent-runs',
       data: {
-        kind: 'agent-run',
+        type: 'agent-run',
         name: 'execute-task',
-        input: { agentId: fromSqid(agent.id).id, task: 'Search for news' },
+        input: { agentId: fromSqid(agent.id).seq, task: 'Search for news' },
       },
     })
     expect(run.id).toMatch(/^arn_/)
 
     // Find all runs
-    const allRuns = await adapter.find({ ns: nsId, collection: 'agent-runs' })
+    const allRuns = await adapter.find({ ns, type: 'agent-runs' })
     expect(allRuns.total).toBe(1)
 
     // Dequeue
-    const dequeued = await adapter.dequeue({ ns: nsId, kind: 'agent-run', limit: 1 })
+    const dequeued = await adapter.dequeue({ ns, type: 'agent-run', limit: 1 })
     expect(dequeued).toHaveLength(1)
     expect(dequeued[0].name).toBe('execute-task')
 
@@ -268,10 +264,10 @@ describe('Agent-runs lifecycle', () => {
     // Complete
     await adapter.complete({ id: run.id, output: { answer: 'Here are the news items.' } })
 
-    const intId = fromSqid(run.id).id
+    const intId = fromSqid(run.id).seq
     const final = await query<{ status: string; steps: unknown[]; output: Record<string, unknown> }>(
       pool,
-      `SELECT status, steps, output FROM actions WHERE id = $1`,
+      `SELECT status, steps, output FROM actions WHERE seq = $1`,
       [intId],
     )
     expect(final.rows[0].status).toBe('completed')
@@ -281,17 +277,17 @@ describe('Agent-runs lifecycle', () => {
 
   it('sub-agent run hierarchy via parent', async () => {
     const parentRun = await adapter.create({
-      ns: nsId,
-      collection: 'agent-runs',
-      data: { kind: 'agent-run', name: 'parent-run' },
+      ns,
+      type: 'agent-runs',
+      data: { type: 'agent-run', name: 'parent-run' },
     })
 
     // Create child run referencing parent (via enqueue with parent)
     const childId = await adapter.enqueue({
-      ns: nsId,
-      kind: 'agent-run',
+      ns,
+      type: 'agent-run',
       name: 'child-run',
-      input: { parentRunId: fromSqid(parentRun.id).id },
+      input: { parentRunId: fromSqid(parentRun.id).seq },
     })
 
     expect(childId).toMatch(/^act_/)
@@ -304,62 +300,62 @@ describe('Agent-runs lifecycle', () => {
 describe('Issues + Projects', () => {
   it('creates project and issues with relationships', async () => {
     const project = await adapter.create({
-      ns: nsId,
-      collection: 'projects',
+      ns,
+      type: 'projects',
       data: { name: 'Platform v2', status: 'active' },
     })
     expect(project.id).toMatch(/^prj_/)
 
-    const projectId = fromSqid(project.id).id
+    const projectId = fromSqid(project.id).seq
 
     const issue1 = await adapter.create({
-      ns: nsId,
-      collection: 'issues',
+      ns,
+      type: 'issues',
       data: { title: 'Fix login bug', status: 'todo', priority: 'high', project: projectId },
     })
     const issue2 = await adapter.create({
-      ns: nsId,
-      collection: 'issues',
+      ns,
+      type: 'issues',
       data: { title: 'Add search', status: 'backlog', priority: 'medium', project: projectId },
     })
     const issue3 = await adapter.create({
-      ns: nsId,
-      collection: 'issues',
+      ns,
+      type: 'issues',
       data: { title: 'Refactor auth', status: 'in-progress', priority: 'medium', project: projectId },
     })
 
     // Find all issues
-    const all = await adapter.find({ ns: nsId, collection: 'issues' })
+    const all = await adapter.find({ ns, type: 'issues' })
     expect(all.total).toBe(3)
 
     // Filter by status
     const todos = await adapter.find({
-      ns: nsId,
-      collection: 'issues',
+      ns,
+      type: 'issues',
       where: { status: { equals: 'todo' } },
     })
     expect(todos.total).toBe(1)
     expect(todos.docs[0].title).toBe('Fix login bug')
 
     // Verify project relationship
-    const found = await adapter.findOne({ ns: nsId, collection: 'issues', id: issue1.id })
+    const found = await adapter.findOne({ ns, type: 'issues', id: issue1.id })
     expect(found!.project).toBe(project.id)
   })
 
   it('sub-issues via parent self-ref', async () => {
     const epic = await adapter.create({
-      ns: nsId,
-      collection: 'issues',
+      ns,
+      type: 'issues',
       data: { title: 'Epic: Auth Overhaul', status: 'todo' },
     })
 
     const sub1 = await adapter.create({
-      ns: nsId,
-      collection: 'issues',
-      data: { title: 'Add OAuth', status: 'todo', parent: fromSqid(epic.id).id },
+      ns,
+      type: 'issues',
+      data: { title: 'Add OAuth', status: 'todo', parent: fromSqid(epic.id).seq },
     })
 
-    const found = await adapter.findOne({ ns: nsId, collection: 'issues', id: sub1.id })
+    const found = await adapter.findOne({ ns, type: 'issues', id: sub1.id })
     expect(found!.parent).toBe(epic.id)
   })
 })
@@ -369,14 +365,14 @@ describe('Issues + Projects', () => {
 // ============================================================
 describe('Cost events', () => {
   it('creating a cost event stores in data table', async () => {
-    const agent = await adapter.create({ ns: nsId, collection: 'agents', data: { name: 'Cost Agent', slug: 'cost' } })
-    const agentId = fromSqid(agent.id).id
+    const agent = await adapter.create({ ns, type: 'agents', data: { name: 'Cost Agent', slug: 'cost' } })
+    const agentId = fromSqid(agent.id).seq
 
     const cost = await adapter.create({
-      ns: nsId,
-      collection: 'cost-events',
+      ns,
+      type: 'cost-events',
       data: {
-        kind: 'llm-inference',
+        type: 'llm-inference',
         amount: 150, // microdollars
         agent: agentId,
         tokens: { input: 1000, output: 500 },
@@ -385,25 +381,25 @@ describe('Cost events', () => {
     expect(cost.id).toMatch(/^cst_/)
 
     // Verify cost event was created in data table
-    const found = await adapter.findOne({ ns: nsId, collection: 'cost-events', id: cost.id })
+    const found = await adapter.findOne({ ns, type: 'cost-events', id: cost.id })
     expect(found).not.toBeNull()
     expect(found!.amount).toBe(150)
   })
 
   it('cost events can be aggregated by agent', async () => {
-    const a1 = await adapter.create({ ns: nsId, collection: 'agents', data: { name: 'Agent A', slug: 'a' } })
-    const a2 = await adapter.create({ ns: nsId, collection: 'agents', data: { name: 'Agent B', slug: 'b' } })
-    const a1Id = fromSqid(a1.id).id
-    const a2Id = fromSqid(a2.id).id
+    const a1 = await adapter.create({ ns, type: 'agents', data: { name: 'Agent A', slug: 'a' } })
+    const a2 = await adapter.create({ ns, type: 'agents', data: { name: 'Agent B', slug: 'b' } })
+    const a1Id = fromSqid(a1.id).seq
+    const a2Id = fromSqid(a2.id).seq
 
     // Agent A: 3 cost events
     for (let i = 0; i < 3; i++) {
-      await adapter.create({ ns: nsId, collection: 'cost-events', data: { kind: 'llm', amount: 100, agent: a1Id } })
+      await adapter.create({ ns, type: 'cost-events', data: { type: 'llm', amount: 100, agent: a1Id } })
     }
     // Agent B: 1 cost event
-    await adapter.create({ ns: nsId, collection: 'cost-events', data: { kind: 'llm', amount: 200, agent: a2Id } })
+    await adapter.create({ ns, type: 'cost-events', data: { type: 'llm', amount: 200, agent: a2Id } })
 
-    const allCosts = await adapter.find({ ns: nsId, collection: 'cost-events' })
+    const allCosts = await adapter.find({ ns, type: 'cost-events' })
     expect(allCosts.total).toBe(4)
   })
 })
@@ -415,8 +411,8 @@ describe('Dynamic collection registration at boot', () => {
   it('loads nouns and registers as dynamic collections', async () => {
     // Seed a noun with schema
     await adapter.create({
-      ns: nsId,
-      collection: 'nouns',
+      ns,
+      type: 'nouns',
       data: {
         name: 'Contact',
         slug: 'contact',
@@ -432,26 +428,26 @@ describe('Dynamic collection registration at boot', () => {
     })
 
     // Load dynamic collections
-    await adapter.loadDynamicCollections(nsId)
+    await adapter.loadDynamicCollections(ns)
 
     // The 'contact' collection should now be available
     const contact = await adapter.create({
-      ns: nsId,
-      collection: 'contact',
+      ns,
+      type: 'contact',
       data: { firstName: 'John', lastName: 'Doe', email: 'john@example.com' },
     })
 
     // Dynamic collections get a derived prefix
     expect(contact.id.length).toBeGreaterThan(4)
 
-    const found = await adapter.findOne({ ns: nsId, collection: 'contact', id: contact.id })
+    const found = await adapter.findOne({ ns, type: 'contact', id: contact.id })
     expect(found!.firstName).toBe('John')
   })
 
   it('handles multiple dynamic collections', async () => {
     await adapter.create({
-      ns: nsId,
-      collection: 'nouns',
+      ns,
+      type: 'nouns',
       data: {
         name: 'Invoice',
         slug: 'invoice',
@@ -459,8 +455,8 @@ describe('Dynamic collection registration at boot', () => {
       },
     })
     await adapter.create({
-      ns: nsId,
-      collection: 'nouns',
+      ns,
+      type: 'nouns',
       data: {
         name: 'Product',
         slug: 'product',
@@ -468,18 +464,18 @@ describe('Dynamic collection registration at boot', () => {
       },
     })
 
-    await adapter.loadDynamicCollections(nsId)
+    await adapter.loadDynamicCollections(ns)
 
-    const inv = await adapter.create({ ns: nsId, collection: 'invoice', data: { total: 9999, status: 'pending' } })
-    const prod = await adapter.create({ ns: nsId, collection: 'product', data: { sku: 'ABC-123', price: 2500 } })
+    const inv = await adapter.create({ ns, type: 'invoice', data: { total: 9999, status: 'pending' } })
+    const prod = await adapter.create({ ns, type: 'product', data: { sku: 'ABC-123', price: 2500 } })
 
     expect(inv.id.length).toBeGreaterThan(4)
     expect(prod.id.length).toBeGreaterThan(4)
 
     // Each collection is isolated
-    const invoices = await adapter.find({ ns: nsId, collection: 'invoice' })
+    const invoices = await adapter.find({ ns, type: 'invoice' })
     expect(invoices.total).toBe(1)
-    const products = await adapter.find({ ns: nsId, collection: 'product' })
+    const products = await adapter.find({ ns, type: 'product' })
     expect(products.total).toBe(1)
   })
 })

@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest'
-import { getTestPool, setupTestSchema, cleanupTestData, teardownTestPool } from './setup.js'
+import { getTestPool, setupTestSchema, cleanupTestData, createTestNs, teardownTestPool } from './setup.js'
 import { DocumentAdapter } from '../src/adapter.js'
 import { fromSqid } from '../src/id/sqids.js'
 import { query, transaction } from '../src/db/pg.js'
@@ -10,13 +10,13 @@ const TEST_DB = process.env.TEST_DATABASE_URL ?? 'postgresql://postgres:test@loc
 
 let adapter: DocumentAdapter
 let pool: pg.Pool
-let nsId: number
+let ns: string
 
 beforeAll(async () => {
   pool = getTestPool() as unknown as pg.Pool
   await setupTestSchema()
 
-  adapter = new DocumentAdapter({ postgres: TEST_DB }, [
+  adapter = new DocumentAdapter({ postgres: TEST_DB, ns: 'edge.test' }, [
     {
       slug: 'posts',
       prefix: 'pos',
@@ -46,11 +46,7 @@ afterAll(async () => {
 
 beforeEach(async () => {
   await cleanupTestData()
-  const result = await query<{ id: number }>(
-    pool,
-    `INSERT INTO ns (uri, name, kind, branch) VALUES ('edge.test', 'Edge', 'production', 'main') RETURNING id`,
-  )
-  nsId = result.rows[0].id
+  ns = await createTestNs('edge.test', 'Edge')
   await adapter.nsResolver.refresh()
 })
 
@@ -68,87 +64,84 @@ describe('complex document structures', () => {
       ],
     }
 
-    const created = await adapter.create({ ns: nsId, collection: 'posts', data: complex })
-    const found = await adapter.findOne({ ns: nsId, collection: 'posts', id: created.id })
+    const created = await adapter.create({ ns, type: 'posts', data: complex })
+    const found = await adapter.findOne({ ns, type: 'posts', id: created.id })
 
     expect(found).not.toBeNull()
     const doc = found as Record<string, unknown>
-    const meta = doc.meta as Record<string, unknown>
-    const seo = meta.seo as Record<string, unknown>
+    const m = doc.meta as Record<string, unknown>
+    const seo = m.seo as Record<string, unknown>
     expect(seo.title).toBe('SEO Title')
   })
 
   it('handles empty document', async () => {
-    const created = await adapter.create({ ns: nsId, collection: 'posts', data: {} })
+    const created = await adapter.create({ ns, type: 'posts', data: {} })
     expect(created.id).toMatch(/^pos_/)
 
-    const found = await adapter.findOne({ ns: nsId, collection: 'posts', id: created.id })
+    const found = await adapter.findOne({ ns, type: 'posts', id: created.id })
     expect(found).not.toBeNull()
   })
 
   it('handles special characters in string values', async () => {
     const created = await adapter.create({
-      ns: nsId,
-      collection: 'posts',
+      ns,
+      type: 'posts',
       data: {
-        title: "It's a test with \"quotes\" and <html> & unicode: 日本語 🎉",
+        title: "It's a test with \"quotes\" and <html> & unicode: \u65E5\u672C\u8A9E",
         body: 'Line 1\nLine 2\tTabbed',
       },
     })
 
-    const found = await adapter.findOne({ ns: nsId, collection: 'posts', id: created.id })
-    expect(found!.title).toBe("It's a test with \"quotes\" and <html> & unicode: 日本語 🎉")
+    const found = await adapter.findOne({ ns, type: 'posts', id: created.id })
+    expect(found!.title).toBe("It's a test with \"quotes\" and <html> & unicode: \u65E5\u672C\u8A9E")
   })
 
   it('handles large documents', async () => {
     const largeBody = 'x'.repeat(100_000)
     const created = await adapter.create({
-      ns: nsId,
-      collection: 'posts',
+      ns,
+      type: 'posts',
       data: { title: 'Large', body: largeBody },
     })
 
-    const found = await adapter.findOne({ ns: nsId, collection: 'posts', id: created.id })
+    const found = await adapter.findOne({ ns, type: 'posts', id: created.id })
     expect((found!.body as string).length).toBe(100_000)
   })
 
   it('handles null and missing fields', async () => {
     const created = await adapter.create({
-      ns: nsId,
-      collection: 'posts',
+      ns,
+      type: 'posts',
       data: { title: null, body: undefined, status: null },
     })
 
-    const found = await adapter.findOne({ ns: nsId, collection: 'posts', id: created.id })
+    const found = await adapter.findOne({ ns, type: 'posts', id: created.id })
     expect(found!.title).toBeNull()
   })
 })
 
 describe('relationship edge cases', () => {
   it('handles many relationships', async () => {
-    // Create 20 tags
     const tagIds: number[] = []
     for (let i = 0; i < 20; i++) {
       const tag = await adapter.create({
-        ns: nsId,
-        collection: 'tags',
+        ns,
+        type: 'tags',
         data: { label: `Tag ${i}` },
       })
-      tagIds.push(fromSqid(tag.id).id)
+      tagIds.push(fromSqid(tag.id).seq)
     }
 
-    // Create post with all 20 tags
     const post = await adapter.create({
-      ns: nsId,
-      collection: 'posts',
+      ns,
+      type: 'posts',
       data: { title: 'Many Tags', tags: tagIds },
     })
 
-    // Verify all rels created
     const rels = await query<{ path: string }>(
       pool,
       `SELECT path FROM rels WHERE "from" = $1 ORDER BY sort`,
-      [fromSqid(post.id).id],
+      [fromSqid(post.id).seq],
     )
     expect(rels.rows).toHaveLength(20)
     expect(rels.rows[0].path).toBe('tags.0')
@@ -156,17 +149,17 @@ describe('relationship edge cases', () => {
   })
 
   it('handles nested array relationships', async () => {
-    const media1 = await adapter.create({ ns: nsId, collection: 'media', data: { url: 'img1.png' } })
-    const media2 = await adapter.create({ ns: nsId, collection: 'media', data: { url: 'img2.png' } })
+    const media1 = await adapter.create({ ns, type: 'media', data: { url: 'img1.png' } })
+    const media2 = await adapter.create({ ns, type: 'media', data: { url: 'img2.png' } })
 
     const post = await adapter.create({
-      ns: nsId,
-      collection: 'posts',
+      ns,
+      type: 'posts',
       data: {
         title: 'With blocks',
         blocks: [
-          { ref: fromSqid(media1.id).id },
-          { ref: fromSqid(media2.id).id },
+          { ref: fromSqid(media1.id).seq },
+          { ref: fromSqid(media2.id).seq },
         ],
       },
     })
@@ -174,7 +167,7 @@ describe('relationship edge cases', () => {
     const rels = await query<{ path: string; to: number }>(
       pool,
       `SELECT path, "to" FROM rels WHERE "from" = $1 ORDER BY path`,
-      [fromSqid(post.id).id],
+      [fromSqid(post.id).seq],
     )
     expect(rels.rows).toHaveLength(2)
     expect(rels.rows[0].path).toBe('blocks.0.ref')
@@ -183,8 +176,8 @@ describe('relationship edge cases', () => {
 
   it('handles no relationships gracefully', async () => {
     const post = await adapter.create({
-      ns: nsId,
-      collection: 'posts',
+      ns,
+      type: 'posts',
       data: { title: 'No rels' },
     })
 
@@ -197,8 +190,8 @@ describe('concurrent operations', () => {
   it('handles concurrent creates', async () => {
     const promises = Array.from({ length: 10 }, (_, i) =>
       adapter.create({
-        ns: nsId,
-        collection: 'posts',
+        ns,
+        type: 'posts',
         data: { title: `Concurrent ${i}` },
       }),
     )
@@ -206,78 +199,68 @@ describe('concurrent operations', () => {
     const results = await Promise.all(promises)
     expect(results).toHaveLength(10)
 
-    // All should have unique IDs
     const ids = new Set(results.map(r => r.id))
     expect(ids.size).toBe(10)
 
-    // All should be findable
-    const all = await adapter.find({ ns: nsId, collection: 'posts' })
+    const all = await adapter.find({ ns, type: 'posts' })
     expect(all.total).toBe(10)
   })
 
   it('handles concurrent action dequeues', async () => {
-    // Enqueue 5 actions
     for (let i = 0; i < 5; i++) {
-      await adapter.enqueue({ ns: nsId, kind: 'job', name: `job-${i}` })
+      await adapter.enqueue({ ns, type: 'job', name: `job-${i}` })
     }
 
-    // Dequeue concurrently from 3 workers
     const [batch1, batch2, batch3] = await Promise.all([
-      adapter.dequeue({ ns: nsId, kind: 'job', limit: 2 }),
-      adapter.dequeue({ ns: nsId, kind: 'job', limit: 2 }),
-      adapter.dequeue({ ns: nsId, kind: 'job', limit: 2 }),
+      adapter.dequeue({ ns, type: 'job', limit: 2 }),
+      adapter.dequeue({ ns, type: 'job', limit: 2 }),
+      adapter.dequeue({ ns, type: 'job', limit: 2 }),
     ])
 
-    // Total dequeued should be 5 (SKIP LOCKED prevents double-dequeue)
     const totalDequeued = batch1.length + batch2.length + batch3.length
     expect(totalDequeued).toBe(5)
 
-    // No duplicates
     const allNames = [...batch1, ...batch2, ...batch3].map(a => a.name)
     expect(new Set(allNames).size).toBe(5)
   })
 })
 
 describe('COW edge cases', () => {
-  let branchNsId: number
+  let branchNs: string
 
   beforeEach(async () => {
-    const branchNs = await adapter.createBranch({
-      parent: nsId,
-      uri: 'edge.test/pr/1',
+    const branch = await adapter.createBranch({
+      parentNs: ns,
+      ns: 'edge.test/pr/1',
       branch: 'feat/edge',
       kind: 'preview',
     })
-    branchNsId = branchNs.id
+    branchNs = branch.ns
     await adapter.nsResolver.refresh()
   })
 
   it('branch with multiple parent docs', async () => {
-    // Create 3 docs in parent
-    await adapter.create({ ns: nsId, collection: 'posts', data: { title: 'P1' } })
-    await adapter.create({ ns: nsId, collection: 'posts', data: { title: 'P2' } })
-    await adapter.create({ ns: nsId, collection: 'posts', data: { title: 'P3' } })
+    await adapter.create({ ns, type: 'posts', data: { title: 'P1' } })
+    await adapter.create({ ns, type: 'posts', data: { title: 'P2' } })
+    await adapter.create({ ns, type: 'posts', data: { title: 'P3' } })
 
-    // Branch should see all 3
-    const branchPosts = await adapter.find({ ns: branchNsId, collection: 'posts' })
+    const branchPosts = await adapter.find({ ns: branchNs, type: 'posts' })
     expect(branchPosts.total).toBe(3)
   })
 
   it('branch modifies one parent doc, rest inherited', async () => {
-    const p1 = await adapter.create({ ns: nsId, collection: 'posts', data: { title: 'P1' } })
-    await adapter.create({ ns: nsId, collection: 'posts', data: { title: 'P2' } })
-    await adapter.create({ ns: nsId, collection: 'posts', data: { title: 'P3' } })
+    const p1 = await adapter.create({ ns, type: 'posts', data: { title: 'P1' } })
+    await adapter.create({ ns, type: 'posts', data: { title: 'P2' } })
+    await adapter.create({ ns, type: 'posts', data: { title: 'P3' } })
 
-    // Modify P1 in branch
     await adapter.updateOne({
-      ns: branchNsId,
-      collection: 'posts',
+      ns: branchNs,
+      type: 'posts',
       id: p1.id,
       data: { title: 'P1 Modified' },
     })
 
-    // Branch sees 3 docs total (1 modified + 2 inherited)
-    const branchPosts = await adapter.find({ ns: branchNsId, collection: 'posts' })
+    const branchPosts = await adapter.find({ ns: branchNs, type: 'posts' })
     expect(branchPosts.total).toBe(3)
 
     const titles = branchPosts.docs.map(d => d.title).sort()
@@ -287,40 +270,36 @@ describe('COW edge cases', () => {
   })
 
   it('branch creates new doc + inherits parent docs', async () => {
-    await adapter.create({ ns: nsId, collection: 'posts', data: { title: 'Parent' } })
-    await adapter.create({ ns: branchNsId, collection: 'posts', data: { title: 'Branch New' } })
+    await adapter.create({ ns, type: 'posts', data: { title: 'Parent' } })
+    await adapter.create({ ns: branchNs, type: 'posts', data: { title: 'Branch New' } })
 
-    const branchPosts = await adapter.find({ ns: branchNsId, collection: 'posts' })
+    const branchPosts = await adapter.find({ ns: branchNs, type: 'posts' })
     expect(branchPosts.total).toBe(2)
   })
 
   it('merge with new + modified + tombstoned docs', async () => {
-    // Create parent docs
-    const p1 = await adapter.create({ ns: nsId, collection: 'posts', data: { title: 'Keep' } })
-    const p2 = await adapter.create({ ns: nsId, collection: 'posts', data: { title: 'Modify' } })
-    const p3 = await adapter.create({ ns: nsId, collection: 'posts', data: { title: 'Delete' } })
+    const p1 = await adapter.create({ ns, type: 'posts', data: { title: 'Keep' } })
+    const p2 = await adapter.create({ ns, type: 'posts', data: { title: 'Modify' } })
+    const p3 = await adapter.create({ ns, type: 'posts', data: { title: 'Delete' } })
 
-    // In branch: modify P2, delete P3, create new
     await adapter.updateOne({
-      ns: branchNsId,
-      collection: 'posts',
+      ns: branchNs,
+      type: 'posts',
       id: p2.id,
       data: { title: 'Modified' },
     })
     await adapter.deleteMany({
-      ns: branchNsId,
-      collection: 'posts',
+      ns: branchNs,
+      type: 'posts',
       where: { title: { equals: 'Delete' } },
     })
-    await adapter.create({ ns: branchNsId, collection: 'posts', data: { title: 'New' } })
+    await adapter.create({ ns: branchNs, type: 'posts', data: { title: 'New' } })
 
-    // Merge
-    const result = await adapter.mergeBranch(branchNsId)
+    const result = await adapter.mergeBranch(branchNs)
     expect(result.merged).toBeGreaterThan(0)
     expect(result.deleted).toBe(1)
 
-    // Parent should have: Keep, Modified, New (3 docs, Delete is gone)
-    const parentPosts = await adapter.find({ ns: nsId, collection: 'posts' })
+    const parentPosts = await adapter.find({ ns, type: 'posts' })
     const titles = parentPosts.docs.map(d => d.title).sort()
     expect(titles).toContain('Keep')
     expect(titles).toContain('Modified')
@@ -331,47 +310,38 @@ describe('COW edge cases', () => {
 
 describe('namespace isolation', () => {
   it('documents are isolated between namespaces', async () => {
-    const ns2Result = await query<{ id: number }>(
-      pool,
-      `INSERT INTO ns (uri, name, kind) VALUES ('other.test', 'Other', 'production') RETURNING id`,
-    )
-    const ns2Id = ns2Result.rows[0].id
+    const ns2 = await createTestNs('other.test', 'Other')
     await adapter.nsResolver.refresh()
 
-    await adapter.create({ ns: nsId, collection: 'posts', data: { title: 'NS1 Post' } })
-    await adapter.create({ ns: ns2Id, collection: 'posts', data: { title: 'NS2 Post' } })
+    await adapter.create({ ns, type: 'posts', data: { title: 'NS1 Post' } })
+    await adapter.create({ ns: ns2, type: 'posts', data: { title: 'NS2 Post' } })
 
-    const ns1Posts = await adapter.find({ ns: nsId, collection: 'posts' })
+    const ns1Posts = await adapter.find({ ns, type: 'posts' })
     expect(ns1Posts.total).toBe(1)
     expect(ns1Posts.docs[0].title).toBe('NS1 Post')
 
-    const ns2Posts = await adapter.find({ ns: ns2Id, collection: 'posts' })
+    const ns2Posts = await adapter.find({ ns: ns2, type: 'posts' })
     expect(ns2Posts.total).toBe(1)
     expect(ns2Posts.docs[0].title).toBe('NS2 Post')
   })
 
   it('rels are scoped to namespace', async () => {
-    const user = await adapter.create({ ns: nsId, collection: 'users', data: { name: 'Author' } })
+    const user = await adapter.create({ ns, type: 'users', data: { name: 'Author' } })
     const post = await adapter.create({
-      ns: nsId,
-      collection: 'posts',
-      data: { title: 'Post', author: fromSqid(user.id).id },
+      ns,
+      type: 'posts',
+      data: { title: 'Post', author: fromSqid(user.id).seq },
     })
 
-    // Create another namespace
-    const ns2Result = await query<{ id: number }>(
-      pool,
-      `INSERT INTO ns (uri, name, kind) VALUES ('other2.test', 'Other2', 'production') RETURNING id`,
-    )
+    await createTestNs('other2.test', 'Other2')
     await adapter.nsResolver.refresh()
 
-    // Rels query should be scoped
-    const rels = await query<{ ns: number }>(
+    const rels = await query<{ ns: string }>(
       pool,
       `SELECT ns FROM rels WHERE "from" = $1`,
-      [fromSqid(post.id).id],
+      [fromSqid(post.id).seq],
     )
-    expect(rels.rows.every(r => r.ns === nsId)).toBe(true)
+    expect(rels.rows.every(r => r.ns === ns)).toBe(true)
   })
 })
 

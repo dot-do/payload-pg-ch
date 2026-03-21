@@ -17,7 +17,7 @@ export async function runRetention(
     pool,
     `DELETE FROM search
      WHERE created < now() - $1::interval
-     RETURNING id`,
+     RETURNING seq`,
     [`${searchDays} days`],
   )
 

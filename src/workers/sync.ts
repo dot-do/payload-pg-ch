@@ -1,5 +1,5 @@
 import type { PgPool } from '../db/pg.js'
-import type { NsRow } from '../types.js'
+import type { DataRow } from '../types.js'
 import { query } from '../db/pg.js'
 
 export interface SyncConfig {
@@ -8,32 +8,39 @@ export interface SyncConfig {
 
 export async function syncPull(
   _pool: PgPool,
-  ns: NsRow,
+  ns: DataRow,
   _config: SyncConfig,
 ): Promise<{ commit: string; changed: number }> {
-  if (!ns.repo) {
-    throw new Error(`Namespace ${ns.id} has no repo configured`)
+  const meta = ns.meta as Record<string, unknown> | null
+  if (!meta?.repo) {
+    throw new Error(`Namespace ${ns.ns} has no repo configured`)
   }
 
   // TODO: Implement GitHub API integration
-  // 1. Fetch commits since ns.commit using GitHub API
-  // 2. For each changed file under ns.root: parse → upsert data
-  // 3. Update ns.commit, ns.synced
+  // 1. Fetch commits since meta.commit using GitHub API
+  // 2. For each changed file under meta.root: parse -> upsert data
+  // 3. Update namespace doc with commit, synced
   // 4. Create version entries with commit SHA
 
-  const commit = ns.commit ?? 'HEAD'
-  await query(_pool, `UPDATE ns SET synced = now() WHERE id = $1`, [ns.id])
+  const commit = (meta.commit as string) ?? 'HEAD'
+  await query(
+    _pool,
+    `UPDATE data SET meta = meta::jsonb || '{"synced": true}'::jsonb, updated = now()
+     WHERE type = 'namespaces' AND ns = $1`,
+    [ns.ns],
+  )
 
   return { commit, changed: 0 }
 }
 
 export async function syncPush(
   _pool: PgPool,
-  ns: NsRow,
+  ns: DataRow,
   _config: SyncConfig,
 ): Promise<{ commit: string; changed: number }> {
-  if (!ns.repo) {
-    throw new Error(`Namespace ${ns.id} has no repo configured`)
+  const meta = ns.meta as Record<string, unknown> | null
+  if (!meta?.repo) {
+    throw new Error(`Namespace ${ns.ns} has no repo configured`)
   }
 
   // TODO: Implement GitHub API integration

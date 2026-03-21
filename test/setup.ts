@@ -20,26 +20,21 @@ export async function setupTestSchema(): Promise<void> {
   if (schemaReady) return
   const p = getTestPool()
 
-  // Drop and recreate all tables
-  await p.query(`
-    DROP TABLE IF EXISTS search CASCADE;
-    DROP TABLE IF EXISTS events CASCADE;
-    DROP TABLE IF EXISTS rels CASCADE;
-    DROP TABLE IF EXISTS actions CASCADE;
-    DROP TABLE IF EXISTS data CASCADE;
-    DROP TABLE IF EXISTS ns CASCADE;
-    DROP TABLE IF EXISTS migrations CASCADE;
-  `)
+  // Check if schema already exists (applied externally)
+  const exists = await p.query(`SELECT 1 FROM pg_tables WHERE tablename = 'data'`)
+  if (exists.rows.length > 0) {
+    schemaReady = true
+    return
+  }
 
   // Apply DDL files in order
   const sqlDir = join(import.meta.dirname, '..', 'sql', 'pg')
   const files = [
-    '001_ns.sql',
-    '002_data.sql',
+    '001_data.sql',
+    '002_rels.sql',
     '003_actions.sql',
-    '004_rels.sql',
-    '005_events.sql',
-    '006_search.sql',
+    '004_events.sql',
+    '005_search.sql',
   ]
 
   for (const file of files) {
@@ -52,11 +47,22 @@ export async function setupTestSchema(): Promise<void> {
 
 export async function cleanupTestData(): Promise<void> {
   const p = getTestPool()
-  await p.query(`DELETE FROM rels`)
+  await p.query(`DELETE FROM search`)
   await p.query(`DELETE FROM events`)
+  await p.query(`DELETE FROM rels`)
   await p.query(`DELETE FROM actions`)
   await p.query(`DELETE FROM data`)
-  await p.query(`DELETE FROM ns`)
+}
+
+/** Insert a namespace doc into the data table (replaces old INSERT INTO ns) */
+export async function createTestNs(uri: string, name: string): Promise<string> {
+  const p = getTestPool()
+  await p.query(
+    `INSERT INTO data (ns, type, id, name, data, rand) VALUES ($1, 'namespaces', $1, $2, '{}', 0)
+     ON CONFLICT DO NOTHING`,
+    [uri, name],
+  )
+  return uri
 }
 
 export async function teardownTestPool(): Promise<void> {

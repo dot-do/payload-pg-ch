@@ -3,11 +3,11 @@ import type { SearchRow } from '../../types.js'
 import { query } from '../pg.js'
 
 export interface InsertSearchArgs {
-  ns: number
+  ns: string
   entity: number
-  collection: string
+  type: string
   version: number
-  title?: string | null
+  name?: string | null
   body?: string | null
   tags?: string[]
   locale?: string | null
@@ -21,15 +21,15 @@ export async function insertSearch(
 ): Promise<SearchRow> {
   const result = await query<SearchRow>(
     tx,
-    `INSERT INTO search (ns, entity, collection, version, title, body, tags, locale, meta, embedding)
+    `INSERT INTO search (ns, entity, type, version, name, body, tags, locale, meta, embedding)
      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
      RETURNING *`,
     [
       args.ns,
       args.entity,
-      args.collection,
+      args.type,
       args.version,
-      args.title ?? null,
+      args.name ?? null,
       args.body ?? null,
       args.tags ?? [],
       args.locale ?? null,
@@ -43,8 +43,8 @@ export async function insertSearch(
 export async function searchByEmbedding(
   pool: PgPool,
   args: {
-    ns: number
-    collection?: string
+    ns: string
+    type?: string
     embedding: number[]
     limit?: number
   },
@@ -53,9 +53,9 @@ export async function searchByEmbedding(
   const params: unknown[] = [args.ns]
   let paramIdx = 2
 
-  if (args.collection) {
-    conditions.push(`collection = $${paramIdx++}`)
-    params.push(args.collection)
+  if (args.type) {
+    conditions.push(`type = $${paramIdx++}`)
+    params.push(args.type)
   }
 
   params.push(`[${args.embedding.join(',')}]`)

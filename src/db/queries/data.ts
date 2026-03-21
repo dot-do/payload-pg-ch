@@ -5,10 +5,15 @@ import { whereToSQL } from '../where.js'
 import type { Where } from '../../types.js'
 
 export interface InsertDataArgs {
-  ns: number
-  collection: string
+  ns: string
+  type: string
+  id?: string | null
+  name?: string | null
   slug?: string | null
-  doc: unknown
+  url?: string | null
+  mdx?: string | null
+  data?: unknown
+  code?: string | null
   meta?: unknown
   status?: string | null
   locale?: string | null
@@ -22,14 +27,19 @@ export async function insertData(
 ): Promise<DataRow> {
   const result = await query<DataRow>(
     tx,
-    `INSERT INTO data (ns, collection, slug, doc, meta, status, locale, rand, embedding)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+    `INSERT INTO data (ns, type, id, name, slug, url, mdx, data, code, meta, status, locale, rand, embedding)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
      RETURNING *`,
     [
       args.ns,
-      args.collection,
+      args.type,
+      args.id,
+      args.name ?? null,
       args.slug ?? null,
-      JSON.stringify(args.doc),
+      args.url ?? null,
+      args.mdx ?? null,
+      args.data ? JSON.stringify(args.data) : '{}',
+      args.code ?? null,
       args.meta ? JSON.stringify(args.meta) : '{}',
       args.status ?? null,
       args.locale ?? null,
@@ -41,9 +51,14 @@ export async function insertData(
 }
 
 export interface UpdateDataArgs {
-  ns: number
-  id: number
-  doc: unknown
+  ns: string
+  seq: number
+  name?: string | null
+  slug?: string | null
+  url?: string | null
+  mdx?: string | null
+  data?: unknown
+  code?: string | null
   meta?: unknown
   status?: string | null
   locale?: string | null
@@ -54,54 +69,78 @@ export async function updateData(
   tx: PgPoolClient,
   args: UpdateDataArgs,
 ): Promise<DataRow> {
-  const setClauses = [
-    'doc = $1',
-    'status = $2',
-    'locale = $3',
-    'embedding = $4',
-    'version = version + 1',
-    'updated = now()',
-  ]
-  const params: unknown[] = [
-    JSON.stringify(args.doc),
-    args.status ?? null,
-    args.locale ?? null,
-    formatVector(args.embedding),
-  ]
-  let paramIdx = 5
+  const setClauses: string[] = ['version = version + 1', 'updated = now()']
+  const params: unknown[] = []
+  let paramIdx = 1
 
+  if (args.name !== undefined) {
+    setClauses.push(`name = $${paramIdx++}`)
+    params.push(args.name)
+  }
+  if (args.slug !== undefined) {
+    setClauses.push(`slug = $${paramIdx++}`)
+    params.push(args.slug)
+  }
+  if (args.url !== undefined) {
+    setClauses.push(`url = $${paramIdx++}`)
+    params.push(args.url)
+  }
+  if (args.mdx !== undefined) {
+    setClauses.push(`mdx = $${paramIdx++}`)
+    params.push(args.mdx)
+  }
+  if (args.data !== undefined) {
+    setClauses.push(`data = $${paramIdx++}`)
+    params.push(JSON.stringify(args.data))
+  }
+  if (args.code !== undefined) {
+    setClauses.push(`code = $${paramIdx++}`)
+    params.push(args.code)
+  }
   if (args.meta !== undefined) {
     setClauses.push(`meta = $${paramIdx++}`)
     params.push(JSON.stringify(args.meta))
   }
+  if (args.status !== undefined) {
+    setClauses.push(`status = $${paramIdx++}`)
+    params.push(args.status)
+  }
+  if (args.locale !== undefined) {
+    setClauses.push(`locale = $${paramIdx++}`)
+    params.push(args.locale)
+  }
+  if (args.embedding !== undefined) {
+    setClauses.push(`embedding = $${paramIdx++}`)
+    params.push(formatVector(args.embedding))
+  }
 
-  params.push(args.id, args.ns)
-  const idParam = paramIdx++
+  params.push(args.seq, args.ns)
+  const seqParam = paramIdx++
   const nsParam = paramIdx++
 
   const result = await query<DataRow>(
     tx,
     `UPDATE data SET ${setClauses.join(', ')}
-     WHERE id = $${idParam} AND ns = $${nsParam}
+     WHERE seq = $${seqParam} AND ns = $${nsParam}
      RETURNING *`,
     params,
   )
   if (result.rows.length === 0) {
-    throw new Error(`Data row not found: id=${args.id} ns=${args.ns}`)
+    throw new Error(`Data row not found: seq=${args.seq} ns=${args.ns}`)
   }
   return result.rows[0]
 }
 
 export async function deleteData(
   tx: PgPoolClient,
-  args: { ns: number; id: number },
+  args: { seq: number; ns: string },
 ): Promise<void> {
-  await query(tx, `DELETE FROM data WHERE id = $1 AND ns = $2`, [args.id, args.ns])
+  await query(tx, `DELETE FROM data WHERE seq = $1 AND ns = $2`, [args.seq, args.ns])
 }
 
 export interface FindDataArgs {
-  ns: number
-  collection: string
+  ns: string
+  type: string
   where?: Where
   sort?: string
   limit?: number
@@ -112,8 +151,8 @@ export async function findData(
   tx: PgPoolClient | PgPool,
   args: FindDataArgs,
 ): Promise<{ rows: DataRow[]; total: number }> {
-  const conditions = ['data.ns = $1', 'data.collection = $2']
-  const params: unknown[] = [args.ns, args.collection]
+  const conditions = ['data.ns = $1', 'data.type = $2']
+  const params: unknown[] = [args.ns, args.type]
   let paramIdx = 3
 
   if (args.where && Object.keys(args.where).length > 0) {
@@ -125,7 +164,7 @@ export async function findData(
 
   const whereClause = conditions.join(' AND ')
   const sortExpr = args.sort ? sanitizeSort(args.sort) : 'created DESC'
-  const orderBy = `ORDER BY ${sortExpr}, data.id DESC`
+  const orderBy = `ORDER BY ${sortExpr}, data.seq DESC`
   const limit = args.limit ? `LIMIT ${nextParam()}` : ''
   const offset = args.offset ? `OFFSET ${nextParam()}` : ''
 
@@ -155,12 +194,12 @@ export async function findData(
 
 export async function findOneData(
   tx: PgPoolClient | PgPool,
-  args: { ns: number; id: number },
+  args: { seq: number; ns: string },
 ): Promise<DataRow | null> {
   const result = await query<DataRow>(
     tx,
-    `SELECT * FROM data WHERE id = $1 AND ns = $2`,
-    [args.id, args.ns],
+    `SELECT * FROM data WHERE seq = $1 AND ns = $2`,
+    [args.seq, args.ns],
   )
   return result.rows[0] ?? null
 }
@@ -168,9 +207,9 @@ export async function findOneData(
 export async function findDataCOW(
   tx: PgPoolClient | PgPool,
   args: {
-    ns: number
-    parent: number
-    collection: string
+    ns: string
+    parent: string
+    type: string
     where?: Where
     sort?: string
     limit?: number
@@ -178,7 +217,7 @@ export async function findDataCOW(
   },
 ): Promise<{ rows: DataRow[]; total: number }> {
   const conditions: string[] = []
-  const params: unknown[] = [args.ns, args.collection, args.parent]
+  const params: unknown[] = [args.ns, args.type, args.parent]
   let paramIdx = 4
 
   if (args.where && Object.keys(args.where).length > 0) {
@@ -206,22 +245,23 @@ export async function findDataCOW(
     WITH branch AS (
       SELECT d.*, true AS branched
       FROM data d
-      WHERE d.ns = $1 AND d.collection = $2
+      WHERE d.ns = $1 AND d.type = $2
     ),
     tombstones AS (
-      SELECT (doc->>'_parent')::bigint AS hidden
+      SELECT (meta->>'_parent')::bigint AS hidden
       FROM data
-      WHERE ns = $1 AND collection = '_tombstone'
+      WHERE ns = $1 AND type = '_tombstone'
     ),
     parent AS (
       SELECT d.*, false AS branched
       FROM data d
-      WHERE d.ns = $3 AND d.collection = $2
-        AND d.id NOT IN (
-          SELECT (doc->>'_parent')::bigint
-          FROM data WHERE ns = $1 AND doc->>'_parent' IS NOT NULL
+      WHERE d.ns = $3 AND d.type = $2
+        AND d.seq NOT IN (
+          SELECT (meta->>'_parent')::bigint
+          FROM data WHERE ns = $1 AND type NOT IN ('namespaces')
+            AND meta->>'_parent' IS NOT NULL
         )
-        AND d.id NOT IN (SELECT hidden FROM tombstones)
+        AND d.seq NOT IN (SELECT hidden FROM tombstones)
     ),
     combined AS (
       SELECT * FROM branch
@@ -245,11 +285,10 @@ export async function findDataCOW(
 }
 
 const PROMOTED_SORT_COLUMNS = new Set([
-  'id', 'ns', 'collection', 'slug', 'status', 'locale', 'created', 'updated', 'rand',
+  'seq', 'id', 'ns', 'type', 'name', 'slug', 'url', 'status', 'locale', 'created', 'updated', 'rand',
 ])
 
 function sanitizeSort(sort: string): string {
-  // Handle Payload's '-field' prefix for DESC
   let dir = 'ASC'
   let field = sort.trim()
 
@@ -258,17 +297,15 @@ function sanitizeSort(sort: string): string {
     field = field.slice(1)
   }
 
-  // Parse explicit ASC/DESC suffix (overrides prefix)
   const match = field.match(/^([a-zA-Z_]+)\s*(ASC|DESC)?$/i)
   if (!match) return 'created DESC'
   const col = match[1]
   if (match[2]) dir = match[2].toUpperCase()
 
-  // Promoted columns sort directly, JSONB fields sort via doc->>
   if (PROMOTED_SORT_COLUMNS.has(col.toLowerCase())) {
     return `${col} ${dir}`
   }
-  return `doc->>'${col.replace(/'/g, "''")}' ${dir}`
+  return `data->>'${col.replace(/'/g, "''")}' ${dir}`
 }
 
 function formatVector(embedding: number[] | null | undefined): string | null {

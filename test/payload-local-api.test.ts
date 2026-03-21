@@ -124,7 +124,7 @@ function documentDBAdapter(opts: { postgres: string }) {
           await setupTestSchema()
           const existing = await query<{ id: number }>(pool, `SELECT id FROM ns WHERE uri = 'payload-test'`)
           if (existing.rows.length === 0) {
-            const inserted = await query<{ id: number }>(pool, `INSERT INTO ns (uri, name, kind, branch) VALUES ('payload-test', 'Payload Test', 'production', 'main') RETURNING id`)
+            const inserted = await query<{ id: number }>(pool, `INSERT INTO data (ns, type, id, name, data, rand) VALUES ('payload-test', 'namespaces', 'payload-test', 'Payload Test', '{}', 0)`)
             NS_ID = inserted.rows[0].id
           } else {
             NS_ID = existing.rows[0].id
@@ -379,7 +379,7 @@ function documentDBAdapter(opts: { postgres: string }) {
           if (!existing) return {} as any
 
           // Delete by finding and removing the specific row by its internal ID
-          const intId = fromSqid(existing.id).id
+          const intId = fromSqid(existing.id).seq
           await query(pool, `DELETE FROM rels WHERE "from" = $1 OR "to" = $1`, [intId])
           await query(pool, `DELETE FROM events WHERE entity = $1`, [intId])
           await query(pool, `DELETE FROM data WHERE id = $1 AND ns = $2`, [intId, NS_ID])
@@ -515,7 +515,7 @@ beforeEach(async () => {
 describe('CRUD lifecycle', () => {
   it('creates a post and returns doc with id', async () => {
     const post = await payload.create({
-      collection: 'posts',
+      type: 'posts',
       data: { title: 'Hello' },
     })
 
@@ -526,10 +526,10 @@ describe('CRUD lifecycle', () => {
   })
 
   it('finds posts and returns PaginatedDocs', async () => {
-    await payload.create({ collection: 'posts', data: { title: 'Post A' } })
-    await payload.create({ collection: 'posts', data: { title: 'Post B' } })
+    await payload.create({ type: 'posts', data: { title: 'Post A' } })
+    await payload.create({ type: 'posts', data: { title: 'Post B' } })
 
-    const result = await payload.find({ collection: 'posts' })
+    const result = await payload.find({ type: 'posts' })
 
     expect(result.docs).toHaveLength(2)
     expect(result.totalDocs).toBe(2)
@@ -541,12 +541,12 @@ describe('CRUD lifecycle', () => {
 
   it('finds a post by ID', async () => {
     const created = await payload.create({
-      collection: 'posts',
+      type: 'posts',
       data: { title: 'Find Me By ID' },
     })
 
     const found = await payload.findByID({
-      collection: 'posts',
+      type: 'posts',
       id: created.id,
     })
 
@@ -557,12 +557,12 @@ describe('CRUD lifecycle', () => {
 
   it('updates a post', async () => {
     const created = await payload.create({
-      collection: 'posts',
+      type: 'posts',
       data: { title: 'Original Title', body: 'Original body' },
     })
 
     const updated = await payload.update({
-      collection: 'posts',
+      type: 'posts',
       id: created.id,
       data: { title: 'Updated Title' },
     })
@@ -575,28 +575,28 @@ describe('CRUD lifecycle', () => {
 
   it('deletes a post', async () => {
     const created = await payload.create({
-      collection: 'posts',
+      type: 'posts',
       data: { title: 'Delete Me' },
     })
 
     const deleted = await payload.delete({
-      collection: 'posts',
+      type: 'posts',
       id: created.id,
     })
 
     expect(deleted.id).toBe(created.id)
 
     // Verify it's gone
-    const result = await payload.find({ collection: 'posts' })
+    const result = await payload.find({ type: 'posts' })
     expect(result.totalDocs).toBe(0)
   })
 
   it('counts posts', async () => {
-    await payload.create({ collection: 'posts', data: { title: 'Count A' } })
-    await payload.create({ collection: 'posts', data: { title: 'Count B' } })
-    await payload.create({ collection: 'posts', data: { title: 'Count C' } })
+    await payload.create({ type: 'posts', data: { title: 'Count A' } })
+    await payload.create({ type: 'posts', data: { title: 'Count B' } })
+    await payload.create({ type: 'posts', data: { title: 'Count C' } })
 
-    const result = await payload.count({ collection: 'posts' })
+    const result = await payload.count({ type: 'posts' })
 
     expect(result.totalDocs).toBe(3)
   })
@@ -609,13 +609,13 @@ describe('CRUD lifecycle', () => {
 describe('relationships', () => {
   it('creates a post with author relationship and verifies population', async () => {
     const user = await payload.create({
-      collection: 'users',
+      type: 'users',
       data: { name: 'Author', email: 'author@test.com', password: 'test-password-123' },
     })
 
     // Payload expects relationship values as the document ID (sqid string)
     const post = await payload.create({
-      collection: 'posts',
+      type: 'posts',
       data: { title: 'Post with Author', author: user.id },
     })
 
@@ -625,12 +625,12 @@ describe('relationships', () => {
   })
 
   it('creates a post with hasMany tags and verifies population', async () => {
-    const tag1 = await payload.create({ collection: 'tags', data: { name: 'TypeScript' } })
-    const tag2 = await payload.create({ collection: 'tags', data: { name: 'Node.js' } })
-    const tag3 = await payload.create({ collection: 'tags', data: { name: 'PostgreSQL' } })
+    const tag1 = await payload.create({ type: 'tags', data: { name: 'TypeScript' } })
+    const tag2 = await payload.create({ type: 'tags', data: { name: 'Node.js' } })
+    const tag3 = await payload.create({ type: 'tags', data: { name: 'PostgreSQL' } })
 
     const post = await payload.create({
-      collection: 'posts',
+      type: 'posts',
       data: {
         title: 'Tagged Post',
         tags: [tag1.id, tag2.id, tag3.id],
@@ -645,21 +645,21 @@ describe('relationships', () => {
 
   it('updates a post to change author relationship', async () => {
     const user1 = await payload.create({
-      collection: 'users',
+      type: 'users',
       data: { name: 'Author 1', email: 'author1@test.com', password: 'test-password-123' },
     })
     const user2 = await payload.create({
-      collection: 'users',
+      type: 'users',
       data: { name: 'Author 2', email: 'author2@test.com', password: 'test-password-123' },
     })
 
     const post = await payload.create({
-      collection: 'posts',
+      type: 'posts',
       data: { title: 'Changing Author', author: user1.id },
     })
 
     const updated = await payload.update({
-      collection: 'posts',
+      type: 'posts',
       id: post.id,
       data: { author: user2.id },
     })
@@ -676,14 +676,14 @@ describe('relationships', () => {
 
 describe('where queries', () => {
   beforeEach(async () => {
-    await payload.create({ collection: 'posts', data: { title: 'Alpha Post', status: 'published' } })
-    await payload.create({ collection: 'posts', data: { title: 'Beta Post', status: 'draft' } })
-    await payload.create({ collection: 'posts', data: { title: 'Gamma Post', status: 'published' } })
+    await payload.create({ type: 'posts', data: { title: 'Alpha Post', status: 'published' } })
+    await payload.create({ type: 'posts', data: { title: 'Beta Post', status: 'draft' } })
+    await payload.create({ type: 'posts', data: { title: 'Gamma Post', status: 'published' } })
   })
 
   it('filters by status with equals', async () => {
     const result = await payload.find({
-      collection: 'posts',
+      type: 'posts',
       where: { status: { equals: 'published' } },
     })
 
@@ -695,7 +695,7 @@ describe('where queries', () => {
 
   it('filters with contains/like', async () => {
     const result = await payload.find({
-      collection: 'posts',
+      type: 'posts',
       where: { title: { contains: 'Alpha' } },
     })
 
@@ -705,7 +705,7 @@ describe('where queries', () => {
 
   it('filters with AND', async () => {
     const result = await payload.find({
-      collection: 'posts',
+      type: 'posts',
       where: {
         and: [
           { status: { equals: 'published' } },
@@ -720,7 +720,7 @@ describe('where queries', () => {
 
   it('filters with OR', async () => {
     const result = await payload.find({
-      collection: 'posts',
+      type: 'posts',
       where: {
         or: [
           { title: { equals: 'Alpha Post' } },
@@ -743,7 +743,7 @@ describe('where queries', () => {
 describe('auth', () => {
   it('creates a user with email and password', async () => {
     const user = await payload.create({
-      collection: 'users',
+      type: 'users',
       data: {
         email: 'newuser@test.com',
         password: 'secure-password-123',
@@ -761,7 +761,7 @@ describe('auth', () => {
 
   it('logs in with email and password', async () => {
     await payload.create({
-      collection: 'users',
+      type: 'users',
       data: {
         email: 'login@test.com',
         password: 'secure-password-123',
@@ -770,7 +770,7 @@ describe('auth', () => {
     })
 
     const loginResult = await payload.login({
-      collection: 'users',
+      type: 'users',
       data: {
         email: 'login@test.com',
         password: 'secure-password-123',
@@ -786,7 +786,7 @@ describe('auth', () => {
 
   it('verifies auth token works', async () => {
     await payload.create({
-      collection: 'users',
+      type: 'users',
       data: {
         email: 'token@test.com',
         password: 'secure-password-123',
@@ -795,7 +795,7 @@ describe('auth', () => {
     })
 
     const loginResult = await payload.login({
-      collection: 'users',
+      type: 'users',
       data: {
         email: 'token@test.com',
         password: 'secure-password-123',
@@ -819,14 +819,14 @@ describe('pagination', () => {
     // Create 15 posts
     for (let i = 1; i <= 15; i++) {
       await payload.create({
-        collection: 'posts',
+        type: 'posts',
         data: { title: `Paginated Post ${String(i).padStart(2, '0')}` },
       })
     }
 
     // Page 1 with limit 5
     const page1 = await payload.find({
-      collection: 'posts',
+      type: 'posts',
       limit: 5,
       page: 1,
     })
@@ -842,7 +842,7 @@ describe('pagination', () => {
 
     // Page 2
     const page2 = await payload.find({
-      collection: 'posts',
+      type: 'posts',
       limit: 5,
       page: 2,
     })
@@ -856,7 +856,7 @@ describe('pagination', () => {
 
     // Page 3
     const page3 = await payload.find({
-      collection: 'posts',
+      type: 'posts',
       limit: 5,
       page: 3,
     })
@@ -879,14 +879,14 @@ describe('pagination', () => {
 
 describe('sort', () => {
   beforeEach(async () => {
-    await payload.create({ collection: 'posts', data: { title: 'Cherry' } })
-    await payload.create({ collection: 'posts', data: { title: 'Apple' } })
-    await payload.create({ collection: 'posts', data: { title: 'Banana' } })
+    await payload.create({ type: 'posts', data: { title: 'Cherry' } })
+    await payload.create({ type: 'posts', data: { title: 'Apple' } })
+    await payload.create({ type: 'posts', data: { title: 'Banana' } })
   })
 
   it('sorts by title ascending', async () => {
     const result = await payload.find({
-      collection: 'posts',
+      type: 'posts',
       sort: 'title',
     })
 
@@ -896,7 +896,7 @@ describe('sort', () => {
 
   it('sorts by title descending', async () => {
     const result = await payload.find({
-      collection: 'posts',
+      type: 'posts',
       sort: '-title',
     })
 
@@ -912,7 +912,7 @@ describe('sort', () => {
 describe('ID format', () => {
   it('returns sqid-format string IDs', async () => {
     const post = await payload.create({
-      collection: 'posts',
+      type: 'posts',
       data: { title: 'ID Format Test' },
     })
 
@@ -928,7 +928,7 @@ describe('ID format', () => {
 
   it('users get usr_ prefix', async () => {
     const user = await payload.create({
-      collection: 'users',
+      type: 'users',
       data: { email: 'prefix@test.com', password: 'test-password-123', name: 'Prefix' },
     })
 
@@ -937,7 +937,7 @@ describe('ID format', () => {
 
   it('tags get tag_ prefix', async () => {
     const tag = await payload.create({
-      collection: 'tags',
+      type: 'tags',
       data: { name: 'Prefix Tag' },
     })
 
@@ -951,7 +951,7 @@ describe('ID format', () => {
 
 describe('edge cases', () => {
   it('handles empty find result', async () => {
-    const result = await payload.find({ collection: 'posts' })
+    const result = await payload.find({ type: 'posts' })
 
     expect(result.docs).toHaveLength(0)
     expect(result.totalDocs).toBe(0)
@@ -963,13 +963,13 @@ describe('edge cases', () => {
   it('handles findByID for non-existent doc', async () => {
     // Payload should throw NotFound for invalid ID
     await expect(
-      payload.findByID({ collection: 'posts', id: 'pos_nonexistent999' }),
+      payload.findByID({ type: 'posts', id: 'pos_nonexistent999' }),
     ).rejects.toThrow()
   })
 
   it('creates and retrieves a post with all fields populated', async () => {
     const post = await payload.create({
-      collection: 'posts',
+      type: 'posts',
       data: {
         title: 'Full Post',
         body: 'This is the body content',
@@ -982,25 +982,25 @@ describe('edge cases', () => {
     expect(post.status).toBe('draft')
 
     // Verify via findByID
-    const found = await payload.findByID({ collection: 'posts', id: post.id })
+    const found = await payload.findByID({ type: 'posts', id: post.id })
     expect(found.title).toBe('Full Post')
     expect(found.body).toBe('This is the body content')
     expect(found.status).toBe('draft')
   })
 
   it('count with where filter', async () => {
-    await payload.create({ collection: 'posts', data: { title: 'Draft 1', status: 'draft' } })
-    await payload.create({ collection: 'posts', data: { title: 'Draft 2', status: 'draft' } })
-    await payload.create({ collection: 'posts', data: { title: 'Published 1', status: 'published' } })
+    await payload.create({ type: 'posts', data: { title: 'Draft 1', status: 'draft' } })
+    await payload.create({ type: 'posts', data: { title: 'Draft 2', status: 'draft' } })
+    await payload.create({ type: 'posts', data: { title: 'Published 1', status: 'published' } })
 
     const draftCount = await payload.count({
-      collection: 'posts',
+      type: 'posts',
       where: { status: { equals: 'draft' } },
     })
     expect(draftCount.totalDocs).toBe(2)
 
     const publishedCount = await payload.count({
-      collection: 'posts',
+      type: 'posts',
       where: { status: { equals: 'published' } },
     })
     expect(publishedCount.totalDocs).toBe(1)

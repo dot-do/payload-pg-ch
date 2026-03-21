@@ -1,38 +1,16 @@
 export type Sqid<P extends string = string> = `${P}_${string}`
 
-export interface NsRow {
-  id: number
-  uri: string
-  name: string | null
-  config: unknown
-  plan: string
-  parent: number | null
-  kind: string
-  ttl: string | null
-  merged: Date | null
-  pr: number | null
-  workosorg: string | null
-  stripe: string | null
-  connect: string | null
-  subscription: string | null
-  onboarded: boolean
-  githuborgid: number | null
-  githubuserid: number | null
-  repo: string | null
-  branch: string
-  root: string
-  synced: Date | null
-  commit: string | null
-  created: Date
-  updated: Date
-}
-
 export interface DataRow {
-  id: number
-  ns: number
-  collection: string
+  seq: number
+  id: string
+  ns: string
+  type: string
+  name: string | null
   slug: string | null
-  doc: unknown
+  url: string | null
+  mdx: string | null
+  data: unknown
+  code: string | null
   meta: unknown
   status: string | null
   locale: string | null
@@ -44,31 +22,20 @@ export interface DataRow {
 }
 
 export interface RelRow {
-  id: number
-  ns: number
+  seq: number
+  ns: string
   from: number
   to: number
-  path: string
+  path: string | null
   sort: number
   meta: unknown
 }
 
-export interface EventRow {
-  id: number
-  ns: number
-  kind: string
-  entity: number | null
-  collection: string | null
-  actor: number | null
-  data: unknown
-  meta: unknown
-  created: Date
-}
-
 export interface ActionRow {
-  id: number
-  ns: number
-  kind: string
+  seq: number
+  id: string
+  ns: string
+  type: string
   name: string
   status: string
   input: unknown
@@ -89,13 +56,25 @@ export interface ActionRow {
   updated: Date
 }
 
+export interface EventRow {
+  seq: number
+  ns: string
+  kind: string
+  entity: number | null
+  type: string | null
+  actor: number | null
+  data: unknown
+  meta: unknown
+  created: Date
+}
+
 export interface SearchRow {
-  id: number
-  ns: number
+  seq: number
+  ns: string
   entity: number
-  collection: string
+  type: string
   version: number
-  title: string | null
+  name: string | null
   body: string | null
   tags: string[]
   locale: string | null
@@ -148,7 +127,8 @@ export interface FieldSchema {
 }
 
 export interface AdapterConfig {
-  postgres: string | { connectionString: string; max?: number }
+  postgres: string
+  ns: string
   clickhouse?: { host: string; port: number; database: string }
   workos?: { apiKey: string; clientId: string }
   stripe?: { secretKey: string; webhookSecret: string; connectWebhookSecret?: string }

@@ -3,7 +3,7 @@ import type { RelRow, FieldSchema } from '../../types.js'
 import { query } from '../pg.js'
 
 export interface InsertRelArgs {
-  ns: number
+  ns: string
   from: number
   to: number
   path: string
@@ -28,14 +28,14 @@ export async function insertRel(
 
 export async function deleteRelsForEntity(
   tx: PgPoolClient,
-  args: { ns: number; from: number },
+  args: { ns: string; from: number },
 ): Promise<void> {
   await query(tx, `DELETE FROM rels WHERE ns = $1 AND "from" = $2`, [args.ns, args.from])
 }
 
 export async function findRelsFrom(
   tx: PgPoolClient | PgPool,
-  args: { from: number; path?: string; ns?: number },
+  args: { from: number; path?: string; ns?: string },
 ): Promise<RelRow[]> {
   if (args.ns !== undefined) {
     if (args.path) {
@@ -71,7 +71,7 @@ export async function findRelsFrom(
 
 export async function findRelsTo(
   tx: PgPoolClient | PgPool,
-  args: { to: number; ns?: number },
+  args: { to: number; ns?: string },
 ): Promise<RelRow[]> {
   if (args.ns !== undefined) {
     const result = await query<RelRow>(

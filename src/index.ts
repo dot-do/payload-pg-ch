@@ -1,5 +1,5 @@
 export { DocumentAdapter } from './adapter.js'
-export { toSqid, fromSqid, registerPrefix, generateRand, getPrefix } from './id/sqids.js'
+export { toSqid, fromSqid, registerPrefix, generateRand, getPrefix, hashNs } from './id/sqids.js'
 export { createPool, transaction, query } from './db/pg.js'
 export { whereToSQL } from './db/where.js'
 export { NsResolver } from './ns/resolver.js'
@@ -14,7 +14,7 @@ export * as searchQueries from './db/queries/search.js'
 
 // Types
 export type {
-  Sqid, NsRow, DataRow, RelRow, EventRow, ActionRow, SearchRow,
+  Sqid, DataRow, RelRow, EventRow, ActionRow, SearchRow,
   Where, WhereField, RequestMeta, CollectionTier, CollectionSchema, FieldSchema,
   AdapterConfig,
 } from './types.js'

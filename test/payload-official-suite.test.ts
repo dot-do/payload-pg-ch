@@ -328,7 +328,7 @@ describe('CRUD - create', () => {
 
   it('should create a user with auth', async () => {
     const user = await payload.create({
-      collection: 'users',
+      type: 'users',
       data: {
         email: 'test@payloadcms.com',
         password: 'test-password-123',
@@ -804,7 +804,7 @@ describe('sort', () => {
 describe('relationships', () => {
   it('should create with relationship and retrieve', async () => {
     const category = await payload.create({
-      collection: 'categories',
+      type: 'categories',
       data: { title: 'Tech' },
     })
 
@@ -823,8 +823,8 @@ describe('relationships', () => {
   })
 
   it('should create with hasMany relationship', async () => {
-    const cat1 = await payload.create({ collection: 'categories', data: { title: 'Cat1' } })
-    const cat2 = await payload.create({ collection: 'categories', data: { title: 'Cat2' } })
+    const cat1 = await payload.create({ type: 'categories', data: { title: 'Cat1' } })
+    const cat2 = await payload.create({ type: 'categories', data: { title: 'Cat2' } })
 
     const post = await payload.create({
       collection: postsSlug,
@@ -840,8 +840,8 @@ describe('relationships', () => {
   })
 
   it('should update relationship field', async () => {
-    const cat1 = await payload.create({ collection: 'categories', data: { title: 'Old' } })
-    const cat2 = await payload.create({ collection: 'categories', data: { title: 'New' } })
+    const cat1 = await payload.create({ type: 'categories', data: { title: 'Old' } })
+    const cat2 = await payload.create({ type: 'categories', data: { title: 'New' } })
 
     const post = await payload.create({
       collection: postsSlug,
@@ -864,7 +864,7 @@ describe('relationships', () => {
 describe('auth', () => {
   it('should login with email and password', async () => {
     await payload.create({
-      collection: 'users',
+      type: 'users',
       data: {
         email: 'login@payloadcms.com',
         password: 'test-password-123',
@@ -873,7 +873,7 @@ describe('auth', () => {
     })
 
     const loginResult = await payload.login({
-      collection: 'users',
+      type: 'users',
       data: {
         email: 'login@payloadcms.com',
         password: 'test-password-123',
@@ -892,18 +892,18 @@ describe('auth', () => {
 describe('versions', () => {
   it('should create versions on update for versioned collection', async () => {
     const category = await payload.create({
-      collection: 'categories',
+      type: 'categories',
       data: { title: 'Version 1' },
     })
 
     await payload.update({
-      collection: 'categories',
+      type: 'categories',
       id: category.id,
       data: { title: 'Version 2' },
     })
 
     const versions = await payload.findVersions({
-      collection: 'categories',
+      type: 'categories',
     })
 
     // Should have at least 1 version entry
@@ -912,23 +912,23 @@ describe('versions', () => {
 
   it('should retrieve specific version by ID', async () => {
     const category = await payload.create({
-      collection: 'categories',
+      type: 'categories',
       data: { title: 'Versioned Doc' },
     })
 
     await payload.update({
-      collection: 'categories',
+      type: 'categories',
       id: category.id,
       data: { title: 'Updated Versioned Doc' },
     })
 
     const versions = await payload.findVersions({
-      collection: 'categories',
+      type: 'categories',
     })
 
     if (versions.docs.length > 0) {
       const version = await payload.findVersionByID({
-        collection: 'categories',
+        type: 'categories',
         id: versions.docs[0].id,
       })
       expect(version).toBeDefined()
@@ -1136,20 +1136,20 @@ describe('block fields', () => {
 describe('simple collection', () => {
   it('should CRUD simple documents', async () => {
     const created = await payload.create({
-      collection: 'simple',
+      type: 'simple',
       data: { text: 'hello', number: 42 },
     })
     expect(created.text).toBe('hello')
     expect(created.number).toBe(42)
 
     const found = await payload.findByID({
-      collection: 'simple',
+      type: 'simple',
       id: created.id,
     })
     expect(found.text).toBe('hello')
 
     const updated = await payload.update({
-      collection: 'simple',
+      type: 'simple',
       id: created.id,
       data: { text: 'world' },
     })
@@ -1157,12 +1157,12 @@ describe('simple collection', () => {
     expect(updated.number).toBe(42)
 
     const deleted = await payload.delete({
-      collection: 'simple',
+      type: 'simple',
       id: created.id,
     })
     expect(deleted.id).toBe(created.id)
 
-    const result = await payload.find({ collection: 'simple' })
+    const result = await payload.find({ type: 'simple' })
     expect(result.totalDocs).toBe(0)
   })
 })
@@ -1173,7 +1173,7 @@ describe('simple collection', () => {
 describe('no-timestamps collection', () => {
   it('should create doc without timestamps', async () => {
     const doc = await payload.create({
-      collection: 'no-timestamps',
+      type: 'no-timestamps',
       data: { title: 'no timestamps' },
     })
 

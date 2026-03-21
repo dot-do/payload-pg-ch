@@ -2,7 +2,7 @@
  * Phase 1 TDD tests: prefix registry, actions facade, versioned collections, noun compiler
  */
 import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest'
-import { getTestPool, setupTestSchema, cleanupTestData, teardownTestPool } from './setup.js'
+import { getTestPool, setupTestSchema, cleanupTestData, createTestNs, teardownTestPool } from './setup.js'
 import { DocumentAdapter } from '../src/adapter.js'
 import { fromSqid, getPrefix } from '../src/id/sqids.js'
 import { query } from '../src/db/pg.js'
@@ -12,7 +12,7 @@ const TEST_DB = process.env.TEST_DATABASE_URL ?? 'postgresql://postgres:test@loc
 
 let adapter: DocumentAdapter
 let pool: pg.Pool
-let nsId: number
+let ns: string
 
 // Full collection registry for all 46 collections
 const ALL_COLLECTIONS = [
@@ -86,11 +86,7 @@ afterAll(async () => {
 
 beforeEach(async () => {
   await cleanupTestData()
-  const result = await query<{ id: number }>(
-    pool,
-    `INSERT INTO ns (uri, name, kind) VALUES ('phase1.test', 'Phase1', 'production') RETURNING id`,
-  )
-  nsId = result.rows[0].id
+  ns = await createTestNs('phase1.test', 'Phase1')
   await adapter.nsResolver.refresh()
 })
 
@@ -117,7 +113,7 @@ describe('prefix registry for all 42 collections', () => {
           data[f.name] = { test: true }
         }
       }
-      const result = await adapter.create({ ns: nsId, collection: col.slug, data })
+      const result = await adapter.create({ ns, type: col.slug, data })
       expect(result.id).toMatch(new RegExp(`^${col.prefix}_`))
     }
   })
@@ -140,10 +136,10 @@ describe('prefix registry for all 42 collections', () => {
 describe('actions table as collection facade', () => {
   it('agent-runs are created in actions table, not data table', async () => {
     const agentRun = await adapter.create({
-      ns: nsId,
-      collection: 'agent-runs',
+      ns,
+      type: 'agent-runs',
       data: {
-        kind: 'agent-run',
+        type: 'agent-run',
         name: 'test-run',
         input: { agentId: 1, messages: [] },
       },
@@ -152,40 +148,40 @@ describe('actions table as collection facade', () => {
     expect(agentRun.id).toMatch(/^arn_/)
 
     // Should NOT be in data table
-    const dataResult = await query(pool, `SELECT id FROM data WHERE ns = $1 AND collection = 'agent-runs'`, [nsId])
+    const dataResult = await query(pool, `SELECT id FROM data WHERE ns = $1 AND type = 'agent-runs'`, [ns])
     expect(dataResult.rows).toHaveLength(0)
 
     // Should BE in actions table
-    const actionsResult = await query(pool, `SELECT id, kind, name FROM actions WHERE ns = $1`, [nsId])
+    const actionsResult = await query(pool, `SELECT id, type, name FROM actions WHERE ns = $1`, [ns])
     expect(actionsResult.rows).toHaveLength(1)
-    expect(actionsResult.rows[0].kind).toBe('agent-run')
+    expect(actionsResult.rows[0].type).toBe('agent-run')
   })
 
   it('agent-runs can be found and queried', async () => {
     await adapter.create({
-      ns: nsId,
-      collection: 'agent-runs',
-      data: { kind: 'agent-run', name: 'run-1', status: 'pending' },
+      ns,
+      type: 'agent-runs',
+      data: { type: 'agent-run', name: 'run-1', status: 'pending' },
     })
     await adapter.create({
-      ns: nsId,
-      collection: 'agent-runs',
-      data: { kind: 'agent-run', name: 'run-2', status: 'completed' },
+      ns,
+      type: 'agent-runs',
+      data: { type: 'agent-run', name: 'run-2', status: 'completed' },
     })
 
-    const all = await adapter.find({ ns: nsId, collection: 'agent-runs' })
+    const all = await adapter.find({ ns, type: 'agent-runs' })
     expect(all.total).toBe(2)
   })
 
   it('agent-runs support the dequeue/checkpoint/complete lifecycle', async () => {
     const run = await adapter.create({
-      ns: nsId,
-      collection: 'agent-runs',
-      data: { kind: 'agent-run', name: 'lifecycle-test' },
+      ns,
+      type: 'agent-runs',
+      data: { type: 'agent-run', name: 'lifecycle-test' },
     })
 
     // Dequeue
-    const dequeued = await adapter.dequeue({ ns: nsId, kind: 'agent-run', limit: 1 })
+    const dequeued = await adapter.dequeue({ ns, type: 'agent-run', limit: 1 })
     expect(dequeued).toHaveLength(1)
 
     // Checkpoint
@@ -194,8 +190,8 @@ describe('actions table as collection facade', () => {
     // Complete
     await adapter.complete({ id: run.id, output: { success: true } })
 
-    const intId = fromSqid(run.id).id
-    const final = await query<{ status: string }>(pool, `SELECT status FROM actions WHERE id = $1`, [intId])
+    const intId = fromSqid(run.id).seq
+    const final = await query<{ status: string }>(pool, `SELECT status FROM actions WHERE seq = $1`, [intId])
     expect(final.rows[0].status).toBe('completed')
   })
 })

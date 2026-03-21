@@ -1,112 +1,133 @@
 import type { PgPool } from '../db/pg.js'
-import type { NsRow } from '../types.js'
+import type { DataRow } from '../types.js'
 import { query, transaction } from '../db/pg.js'
+import { generateRand } from '../id/sqids.js'
 
 export interface CreateBranchArgs {
-  parent: number
-  uri: string
+  parentNs: string
+  ns: string
   name?: string
   branch?: string
   kind?: string
   ttl?: string
   pr?: number
-  repo?: string
-  root?: string
-  githuborgid?: number | null
 }
 
+/**
+ * Create a branch namespace by inserting a `type='namespaces'` doc in the data table.
+ * Parent info is stored in the `meta` JSONB column.
+ */
 export async function createBranch(
   pool: PgPool,
   args: CreateBranchArgs,
-): Promise<NsRow> {
-  const result = await query<NsRow>(
+): Promise<DataRow> {
+  const rand = generateRand()
+  const meta: Record<string, unknown> = {
+    _parent: args.parentNs,
+    kind: args.kind ?? 'preview',
+  }
+  if (args.branch) meta.branch = args.branch
+  if (args.ttl) meta.ttl = args.ttl
+  if (args.pr) meta.pr = args.pr
+
+  const result = await query<DataRow>(
     pool,
-    `INSERT INTO ns (uri, name, parent, kind, branch, ttl, pr, repo, root, githuborgid)
-     VALUES ($1, $2, $3, $4, $5, $6::interval, $7, $8, $9, $10)
+    `INSERT INTO data (id, ns, type, name, data, meta, rand)
+     VALUES ($1, $2, 'namespaces', $3, '{}', $4, $5)
      RETURNING *`,
     [
-      args.uri,
-      args.name ?? null,
-      args.parent,
-      args.kind ?? 'preview',
-      args.branch ?? null,
-      args.ttl ?? null,
-      args.pr ?? null,
-      args.repo ?? null,
-      args.root ?? '/',
-      args.githuborgid ?? null,
+      args.ns,
+      args.ns,
+      args.name ?? args.ns,
+      JSON.stringify(meta),
+      rand,
     ],
   )
   return result.rows[0]
 }
 
+/**
+ * Merge a branch namespace into its parent.
+ * Reads all docs from the branch (excluding tombstones), applies them to the parent ns.
+ */
 export async function mergeBranch(
   pool: PgPool,
-  branchNsId: number,
+  branchNs: string,
 ): Promise<{ merged: number; deleted: number }> {
   return transaction(pool, async (tx) => {
-    // Get branch ns
-    const nsResult = await query<NsRow>(tx, `SELECT * FROM ns WHERE id = $1`, [branchNsId])
-    const branch = nsResult.rows[0]
-    if (!branch) throw new Error(`Branch namespace not found: ${branchNsId}`)
-    if (!branch.parent) throw new Error(`Cannot merge a root namespace`)
-    if (branch.merged) throw new Error('Branch already merged')
-
-    // Get modified docs (excluding tombstones)
-    const docsResult = await query<{ id: number; doc: unknown; meta: unknown; collection: string; slug: string | null; status: string | null; locale: string | null; rand: number; created: Date }>(
+    // Get the branch namespace doc
+    const nsResult = await query<DataRow>(
       tx,
-      `SELECT id, doc, meta, collection, slug, status, locale, rand, created FROM data WHERE ns = $1 AND collection != '_tombstone'`,
-      [branchNsId],
+      `SELECT * FROM data WHERE type = 'namespaces' AND ns = $1 LIMIT 1`,
+      [branchNs],
+    )
+    const branchDoc = nsResult.rows[0]
+    if (!branchDoc) throw new Error(`Branch namespace not found: ${branchNs}`)
+    const branchMeta = branchDoc.meta as Record<string, unknown> | null
+    const parentNs = branchMeta?._parent as string | undefined
+    if (!parentNs) throw new Error(`Cannot merge a root namespace`)
+    if (branchMeta?.merged) throw new Error('Branch already merged')
+
+    // Get modified docs (excluding tombstones and the namespace doc itself)
+    const docsResult = await query<DataRow>(
+      tx,
+      `SELECT * FROM data WHERE ns = $1 AND type != '_tombstone' AND type != 'namespaces'`,
+      [branchNs],
     )
 
     let merged = 0
     for (const row of docsResult.rows) {
-      const parsed = typeof row.doc === 'string' ? JSON.parse(row.doc) : { ...row.doc as Record<string, unknown> }
+      const rowData = typeof row.data === 'string' ? JSON.parse(row.data) : row.data
       const rowMeta = (typeof row.meta === 'string' ? JSON.parse(row.meta) : row.meta) as Record<string, unknown> | null
-      const parentId = rowMeta?._parent as number | undefined
+      const parentSeq = rowMeta?._parent as number | undefined
 
-      if (parentId) {
+      if (parentSeq) {
         // Update existing parent document
         await query(
           tx,
-          `UPDATE data SET doc = $1, version = version + 1, updated = now() WHERE ns = $2 AND id = $3`,
-          [JSON.stringify(parsed), branch.parent, parentId],
+          `UPDATE data SET data = $1, version = version + 1, updated = now() WHERE ns = $2 AND seq = $3`,
+          [JSON.stringify(rowData), parentNs, parentSeq],
         )
         // Copy rels from branch to parent (replace old parent rels)
-        await query(tx, `DELETE FROM rels WHERE ns = $1 AND "from" = $2`, [branch.parent, parentId])
-        const branchRels = await query<{ to: number; path: string; sort: number; meta: unknown }>(
+        await query(tx, `DELETE FROM rels WHERE ns = $1 AND "from" = $2`, [parentNs, parentSeq])
+        const branchRels = await query<{ to: number; path: string | null; sort: number; meta: unknown }>(
           tx,
           `SELECT "to", path, sort, meta FROM rels WHERE ns = $1 AND "from" = $2`,
-          [branchNsId, row.id],
+          [branchNs, row.seq],
         )
         for (const rel of branchRels.rows) {
           await query(
             tx,
             `INSERT INTO rels (ns, "from", "to", path, sort, meta) VALUES ($1, $2, $3, $4, $5, $6)
              ON CONFLICT ("from", path, "to") DO UPDATE SET sort = $5, meta = $6`,
-            [branch.parent, parentId, rel.to, rel.path, rel.sort, rel.meta ? JSON.stringify(rel.meta) : null],
+            [parentNs, parentSeq, rel.to, rel.path, rel.sort, rel.meta ? JSON.stringify(rel.meta) : null],
           )
         }
       } else {
         // New document created in branch — insert into parent
-        const newRow = await query<{ id: number }>(
+        const newRow = await query<{ seq: number }>(
           tx,
-          `INSERT INTO data (ns, collection, slug, doc, status, locale, rand, created, updated)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, now())
-           RETURNING id`,
-          [branch.parent, row.collection, row.slug, JSON.stringify(parsed), row.status, row.locale, row.rand, row.created],
+          `INSERT INTO data (id, ns, type, name, slug, url, data, mdx, code, meta, status, locale, rand, created, updated)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, now())
+           ON CONFLICT (url) DO UPDATE SET url = NULL
+           RETURNING seq`,
+          [
+            row.id, parentNs, row.type, row.name, row.slug, null,
+            JSON.stringify(rowData), row.mdx, row.code,
+            '{}', row.status, row.locale, row.rand, row.created,
+          ],
         )
         // Copy rels from branch to parent for new doc
-        const branchRels = await query<{ to: number; path: string; sort: number; meta: unknown }>(
+        const branchRels = await query<{ to: number; path: string | null; sort: number; meta: unknown }>(
           tx,
           `SELECT "to", path, sort, meta FROM rels WHERE ns = $1 AND "from" = $2`,
-          [branchNsId, row.id],
+          [branchNs, row.seq],
         )
         for (const rel of branchRels.rows) {
           await query(
             tx,
             `INSERT INTO rels (ns, "from", "to", path, sort, meta) VALUES ($1, $2, $3, $4, $5, $6)`,
-            [branch.parent, newRow.rows[0].id, rel.to, rel.path, rel.sort, rel.meta ? JSON.stringify(rel.meta) : null],
+            [parentNs, newRow.rows[0].seq, rel.to, rel.path, rel.sort, rel.meta ? JSON.stringify(rel.meta) : null],
           )
         }
       }
@@ -116,46 +137,57 @@ export async function mergeBranch(
     // Handle tombstones — delete from parent
     const tombResult = await query<{ meta: unknown }>(
       tx,
-      `SELECT meta FROM data WHERE ns = $1 AND collection = '_tombstone'`,
-      [branchNsId],
+      `SELECT meta FROM data WHERE ns = $1 AND type = '_tombstone'`,
+      [branchNs],
     )
     let deleted = 0
     for (const t of tombResult.rows) {
       const tombMeta = (typeof t.meta === 'string' ? JSON.parse(t.meta) : t.meta) as Record<string, unknown> | null
-      const _parent = tombMeta?._parent
-      if (_parent) {
-        await query(tx, `DELETE FROM data WHERE ns = $1 AND id = $2`, [branch.parent, _parent])
+      const parentSeq = tombMeta?._parent as number | undefined
+      if (parentSeq) {
+        await query(tx, `DELETE FROM data WHERE ns = $1 AND seq = $2`, [parentNs, parentSeq])
         deleted++
       }
     }
 
     // Mark branch as merged
-    await query(tx, `UPDATE ns SET merged = now() WHERE id = $1`, [branchNsId])
+    await query(
+      tx,
+      `UPDATE data SET meta = meta::jsonb || '{"merged": true}'::jsonb, updated = now()
+       WHERE type = 'namespaces' AND ns = $1`,
+      [branchNs],
+    )
 
     return { merged, deleted }
   })
 }
 
+/**
+ * Clean up all data for a branch namespace.
+ */
 export async function cleanupBranch(
   pool: PgPool,
-  branchNsId: number,
+  branchNs: string,
 ): Promise<void> {
   await transaction(pool, async (tx) => {
-    await query(tx, `DELETE FROM rels WHERE ns = $1`, [branchNsId])
-    await query(tx, `DELETE FROM data WHERE ns = $1`, [branchNsId])
-    await query(tx, `DELETE FROM ns WHERE id = $1`, [branchNsId])
+    await query(tx, `DELETE FROM events WHERE ns = $1`, [branchNs])
+    await query(tx, `DELETE FROM rels WHERE ns = $1`, [branchNs])
+    await query(tx, `DELETE FROM data WHERE ns = $1`, [branchNs])
   })
 }
 
 export async function cleanupExpiredPreviews(pool: PgPool): Promise<number> {
-  const expired = await query<{ id: number }>(
+  const expired = await query<{ ns: string; meta: unknown }>(
     pool,
-    `SELECT id FROM ns
-     WHERE kind = 'preview' AND merged IS NULL AND ttl IS NOT NULL
-       AND created + ttl < now()`,
+    `SELECT ns, meta FROM data
+     WHERE type = 'namespaces'
+       AND meta->>'kind' = 'preview'
+       AND meta->>'merged' IS NULL
+       AND meta->>'ttl' IS NOT NULL
+       AND created + (meta->>'ttl')::interval < now()`,
   )
-  for (const ns of expired.rows) {
-    await cleanupBranch(pool, ns.id)
+  for (const row of expired.rows) {
+    await cleanupBranch(pool, row.ns)
   }
   return expired.rows.length
 }

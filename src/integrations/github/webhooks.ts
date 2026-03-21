@@ -2,7 +2,7 @@ import type { PgPool } from '../../db/pg.js'
 import { query } from '../../db/pg.js'
 import { createBranch, mergeBranch, cleanupBranch } from '../../ns/branch.js'
 import { emit } from '../../db/queries/events.js'
-import type { NsRow } from '../../types.js'
+import type { DataRow } from '../../types.js'
 
 export interface GitHubWebhookConfig {
   webhookSecret: string
@@ -38,9 +38,9 @@ export async function handlePullRequest(
   const branch = event.pull_request.head.ref
 
   // Find the production namespace for this repo
-  const parentResult = await query<NsRow>(
+  const parentResult = await query<DataRow>(
     pool,
-    `SELECT * FROM ns WHERE repo = $1 AND kind = 'production' LIMIT 1`,
+    `SELECT * FROM data WHERE type = 'namespaces' AND meta->>'kind' = 'production' AND meta->>'repo' = $1 LIMIT 1`,
     [repo],
   )
   const parent = parentResult.rows[0]
@@ -49,50 +49,47 @@ export async function handlePullRequest(
   switch (event.action) {
     case 'opened':
     case 'reopened': {
-      const previewUri = `${parent.uri}/pr/${pr}`
+      const previewNs = `${parent.ns}/pr/${pr}`
       // Check if preview already exists
-      const existing = await query(pool, `SELECT id FROM ns WHERE uri = $1`, [previewUri])
+      const existing = await query(pool, `SELECT seq FROM data WHERE type = 'namespaces' AND ns = $1`, [previewNs])
       if (existing.rows.length > 0) return
 
       await createBranch(pool, {
-        parent: parent.id,
-        uri: previewUri,
+        parentNs: parent.ns,
+        ns: previewNs,
         name: `PR #${pr}: ${branch}`,
         branch,
         kind: 'preview',
         ttl: '7 days',
         pr,
-        repo: parent.repo ?? undefined,
-        root: parent.root,
-        githuborgid: parent.githuborgid,
       })
 
       await emit(pool, {
-        ns: parent.id,
+        ns: parent.ns,
         kind: 'preview.created',
-        meta: { pr, branch, uri: previewUri },
+        meta: { pr, branch, ns: previewNs },
       })
       break
     }
 
     case 'closed': {
-      const previewUri = `${parent.uri}/pr/${pr}`
-      const previewResult = await query<NsRow>(pool, `SELECT * FROM ns WHERE uri = $1`, [previewUri])
+      const previewNs = `${parent.ns}/pr/${pr}`
+      const previewResult = await query<DataRow>(pool, `SELECT * FROM data WHERE type = 'namespaces' AND ns = $1`, [previewNs])
       const preview = previewResult.rows[0]
       if (!preview) return
 
       if (event.pull_request.merged) {
-        await mergeBranch(pool, preview.id)
+        await mergeBranch(pool, previewNs)
         await emit(pool, {
-          ns: parent.id,
+          ns: parent.ns,
           kind: 'branch.merged',
-          meta: { pr, branch, uri: previewUri },
+          meta: { pr, branch, ns: previewNs },
         })
       }
 
-      await cleanupBranch(pool, preview.id)
+      await cleanupBranch(pool, previewNs)
       await emit(pool, {
-        ns: parent.id,
+        ns: parent.ns,
         kind: 'preview.cleaned',
         meta: { pr, branch },
       })
@@ -109,15 +106,15 @@ export async function handlePush(
   const branch = event.ref.replace('refs/heads/', '')
 
   // Find namespaces tracking this repo+branch
-  const nsResult = await query<NsRow>(
+  const nsResult = await query<DataRow>(
     pool,
-    `SELECT * FROM ns WHERE repo = $1 AND branch = $2`,
+    `SELECT * FROM data WHERE type = 'namespaces' AND meta->>'repo' = $1 AND meta->>'branch' = $2`,
     [repo, branch],
   )
 
-  for (const ns of nsResult.rows) {
+  for (const nsDoc of nsResult.rows) {
     await emit(pool, {
-      ns: ns.id,
+      ns: nsDoc.ns,
       kind: 'github.push',
       meta: { commit: event.after, branch },
     })
