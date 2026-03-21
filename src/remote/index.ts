@@ -1,0 +1,5 @@
+export { RemoteDocumentAdapter, createRemoteAdapter } from './client.js'
+export type { RemoteAdapterConfig } from './client.js'
+export { remoteDBAdapter } from './adapter.js'
+export { createRpcHandler } from './server.js'
+export type { RpcServerConfig } from './server.js'

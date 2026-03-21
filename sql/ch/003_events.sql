@@ -2,7 +2,7 @@
 -- events: unified event stream with ULID IDs
 -- Two sources feed this table:
 --   1. Data mutations via MV from versions table (CDC of pg.data)
---   2. App events via MV from events_ingest table (CDC of pg.events)
+--   2. App events via MV from ingest table (CDC of pg.events)
 -- ==========================================================================
 
 CREATE TABLE events (
@@ -42,8 +42,8 @@ SELECT
 FROM versions;
 
 -- Source 2: App events CDC landing (PeerDB mirror of pg.events)
--- PeerDB config: pg.events → ch.events_ingest
-CREATE TABLE events_ingest (
+-- PeerDB config: pg.events → ch.ingest
+CREATE TABLE ingest (
   seq                   UInt64,
   ns                    String,
   kind                  LowCardinality(String),
@@ -69,4 +69,4 @@ SELECT
   coalesce(data, '{}')      AS data,
   coalesce(meta, '{}')      AS meta,
   'app'                     AS source
-FROM events_ingest;
+FROM ingest;
