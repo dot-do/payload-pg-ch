@@ -1,10 +1,10 @@
-DROP VIEW IF EXISTS mv_cdc_events_to_events;
+DROP VIEW IF EXISTS mv_ingest_to_events;
 DROP VIEW IF EXISTS mv_versions_to_events;
 DROP VIEW IF EXISTS mv_versions_to_data;
 DROP TABLE IF EXISTS actions;
 DROP TABLE IF EXISTS rels;
 DROP TABLE IF EXISTS search;
-DROP TABLE IF EXISTS cdc_events;
+DROP TABLE IF EXISTS events_ingest;
 DROP TABLE IF EXISTS events;
 DROP TABLE IF EXISTS data;
 DROP TABLE IF EXISTS versions;

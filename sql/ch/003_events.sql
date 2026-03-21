@@ -1,6 +1,8 @@
 -- ==========================================================================
 -- events: unified event stream with ULID IDs
--- Two sources: data mutations (via MV from versions) + non-mutation events (CDC from PG events)
+-- Two sources feed this table:
+--   1. Data mutations via MV from versions table (CDC of pg.data)
+--   2. App events via MV from events_ingest table (CDC of pg.events)
 -- ==========================================================================
 
 CREATE TABLE events (
@@ -19,7 +21,7 @@ CREATE TABLE events (
 ORDER BY (ns, kind, ts)
 PARTITION BY toYYYYMM(ts);
 
--- Data mutations → events
+-- Source 1: Data mutations → events (from CDC of pg.data → versions)
 CREATE MATERIALIZED VIEW mv_versions_to_events TO events AS
 SELECT
   generateULID()        AS id,
@@ -39,8 +41,9 @@ SELECT
   'cdc'                 AS source
 FROM versions;
 
--- CDC landing for PG events table (non-mutation events)
-CREATE TABLE cdc_events (
+-- Source 2: App events CDC landing (PeerDB mirror of pg.events)
+-- PeerDB config: pg.events → ch.events_ingest
+CREATE TABLE events_ingest (
   seq                   UInt64,
   ns                    String,
   kind                  LowCardinality(String),
@@ -56,8 +59,8 @@ CREATE TABLE cdc_events (
 ORDER BY (ns, kind, created)
 PARTITION BY toYYYYMM(created);
 
--- Non-mutation events → unified events
-CREATE MATERIALIZED VIEW mv_cdc_events_to_events TO events AS
+-- Source 2: App events → unified events
+CREATE MATERIALIZED VIEW mv_ingest_to_events TO events AS
 SELECT
   generateULID()            AS id,
   created                   AS ts,
@@ -66,4 +69,4 @@ SELECT
   coalesce(data, '{}')      AS data,
   coalesce(meta, '{}')      AS meta,
   'app'                     AS source
-FROM cdc_events;
+FROM events_ingest;
