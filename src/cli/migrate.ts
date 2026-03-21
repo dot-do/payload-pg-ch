@@ -57,12 +57,11 @@ const pool = new Pool({ connectionString, ssl, max: 3 })
 const SQL_DIR = join(__dirname, '..', '..', 'sql', 'pg')
 
 const DDL_FILES = [
-  '001_ns.sql',
-  '002_data.sql',
+  '001_data.sql',
+  '002_rels.sql',
   '003_actions.sql',
-  '004_rels.sql',
-  '005_events.sql',
-  '006_search.sql',
+  '004_events.sql',
+  '005_search.sql',
 ]
 
 async function up() {
@@ -113,7 +112,7 @@ async function up() {
 async function down() {
   console.log('Dropping schema from', connectionString.replace(/:[^@]+@/, ':***@'))
 
-  const tables = ['search', 'events', 'rels', 'actions', 'data', 'ns', 'migrations']
+  const tables = ['search', 'events', 'rels', 'actions', 'data', 'migrations']
   for (const table of tables) {
     await pool.query(`DROP TABLE IF EXISTS ${table} CASCADE`)
     console.log(`  ✓ dropped ${table}`)
@@ -125,7 +124,7 @@ async function down() {
 async function status() {
   console.log('Schema status for', connectionString.replace(/:[^@]+@/, ':***@'))
 
-  const tables = ['ns', 'data', 'actions', 'rels', 'events', 'search', 'migrations']
+  const tables = ['data', 'rels', 'actions', 'events', 'search', 'migrations']
   for (const table of tables) {
     try {
       const r = await pool.query(`SELECT count(*) AS cnt FROM ${table}`)
@@ -147,14 +146,14 @@ async function status() {
 async function seed() {
   console.log('Seeding default namespace...')
 
-  const existing = await pool.query(`SELECT id FROM ns WHERE uri = 'localhost'`)
+  const existing = await pool.query(`SELECT seq FROM data WHERE ns = 'localhost' AND type = 'namespaces'`)
   if (existing.rows.length > 0) {
-    console.log(`  · namespace 'localhost' already exists (id=${existing.rows[0].id})`)
+    console.log(`  · namespace 'localhost' already exists (seq=${existing.rows[0].seq})`)
   } else {
     const r = await pool.query(
-      `INSERT INTO ns (uri, name, kind) VALUES ('localhost', 'Development', 'production') RETURNING id`,
+      `INSERT INTO data (ns, type, id, name, data, rand) VALUES ('localhost', 'namespaces', 'localhost', 'Development', '{}', 0) RETURNING seq`,
     )
-    console.log(`  ✓ namespace 'localhost' created (id=${r.rows[0].id})`)
+    console.log(`  ✓ namespace 'localhost' created (seq=${r.rows[0].seq})`)
   }
 
   console.log('\n✓ Seed complete')
