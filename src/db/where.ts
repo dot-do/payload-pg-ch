@@ -52,7 +52,9 @@ export function whereToSQL(
       }
     }
     if (op.like !== undefined) {
-      clauses.push(`${col} LIKE ${nextParam(op.like)}`)
+      // Payload's `like` means case-insensitive partial match (same as Drizzle adapter)
+      const likeVal = String(op.like)
+      clauses.push(`${col} ILIKE ${nextParam(likeVal.includes('%') ? likeVal : `%${likeVal}%`)}`)
     }
     if (op.contains !== undefined) {
       clauses.push(`${col} ILIKE ${nextParam(`%${op.contains}%`)}`)

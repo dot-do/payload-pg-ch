@@ -103,7 +103,8 @@ export async function findData(
   }
 
   const whereClause = conditions.join(' AND ')
-  const orderBy = args.sort ? `ORDER BY ${sanitizeSort(args.sort)}` : 'ORDER BY data.created DESC'
+  const sortExpr = args.sort ? sanitizeSort(args.sort) : 'created DESC'
+  const orderBy = `ORDER BY ${sortExpr}, data.id DESC`
   const limit = args.limit ? `LIMIT ${nextParam()}` : ''
   const offset = args.offset ? `OFFSET ${nextParam()}` : ''
 
@@ -222,13 +223,31 @@ export async function findDataCOW(
   }
 }
 
+const PROMOTED_SORT_COLUMNS = new Set([
+  'id', 'ns', 'collection', 'slug', 'status', 'locale', 'created', 'updated', 'rand',
+])
+
 function sanitizeSort(sort: string): string {
-  // Only allow simple column names with optional ASC/DESC
-  const match = sort.match(/^([a-z]+)\s*(ASC|DESC)?$/i)
+  // Handle Payload's '-field' prefix for DESC
+  let dir = 'ASC'
+  let field = sort.trim()
+
+  if (field.startsWith('-')) {
+    dir = 'DESC'
+    field = field.slice(1)
+  }
+
+  // Parse explicit ASC/DESC suffix (overrides prefix)
+  const match = field.match(/^([a-zA-Z_]+)\s*(ASC|DESC)?$/i)
   if (!match) return 'created DESC'
   const col = match[1]
-  const dir = match[2]?.toUpperCase() === 'ASC' ? 'ASC' : 'DESC'
-  return `${col} ${dir}`
+  if (match[2]) dir = match[2].toUpperCase()
+
+  // Promoted columns sort directly, JSONB fields sort via doc->>
+  if (PROMOTED_SORT_COLUMNS.has(col.toLowerCase())) {
+    return `${col} ${dir}`
+  }
+  return `doc->>'${col.replace(/'/g, "''")}' ${dir}`
 }
 
 function formatVector(embedding: number[] | null | undefined): string | null {

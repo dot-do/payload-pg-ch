@@ -127,11 +127,12 @@ function convertWhere(where: Where | undefined): InternalWhere | undefined {
     if (ops.not_in && Array.isArray(ops.not_in)) ops.not_in = ops.not_in.map(decodeSqidValue)
   }
 
+  // Only decode sqid values for the `id` field — other fields store sqids as strings
   function walk(obj: Record<string, unknown>) {
     for (const [key, val] of Object.entries(obj)) {
       if (key === 'and' || key === 'or') {
         if (Array.isArray(val)) val.forEach(v => walk(v as Record<string, unknown>))
-      } else if (val && typeof val === 'object' && !Array.isArray(val)) {
+      } else if (key === 'id' && val && typeof val === 'object' && !Array.isArray(val)) {
         decodeOps(val as Record<string, unknown>)
       }
     }
@@ -342,7 +343,7 @@ export function documentDBAdapter(config: DocumentDBAdapterConfig): DatabaseAdap
           await adapter.deleteMany({
             ns,
             collection: args.collection,
-            where: { id: { equals: found.id } },
+            where: { id: { equals: fromSqid(found.id).id } },
           })
 
           return toPayloadDoc(found)

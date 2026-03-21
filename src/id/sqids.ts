@@ -32,6 +32,8 @@ const PREFIXES: Record<string, string> = {
   'cost-events': 'cst', 'budget-policies': 'bgt',
   // Media
   media: 'med',
+  // Internal Payload collections
+  '_globals': 'glb',
   // Legacy (backward compat)
   posts: 'pos', pages: 'pag', products: 'prd', orders: 'ord',
   categories: 'cat', tags: 'tag', actions: 'act',
@@ -42,7 +44,16 @@ export function registerPrefix(collection: string, prefix: string): void {
 }
 
 export function getPrefix(collection: string): string {
-  return PREFIXES[collection] ?? collection.slice(0, 3)
+  if (PREFIXES[collection]) return PREFIXES[collection]
+  // For internal collections like _versions_posts, derive from the base collection
+  if (collection.startsWith('_versions_')) {
+    const base = collection.slice('_versions_'.length)
+    const basePrefix = PREFIXES[base] ?? base.replace(/[^a-z]/g, '').slice(0, 3)
+    return `v${basePrefix.slice(0, 2)}`  // e.g., _versions_posts -> vpo, _versions_categories -> vca
+  }
+  // Strip leading underscores for prefix derivation
+  const clean = collection.replace(/^_+/, '')
+  return clean.slice(0, 3) || 'doc'
 }
 
 export function toSqid(
