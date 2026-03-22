@@ -120,6 +120,28 @@ export class RemoteDocumentAdapter implements IDocumentAdapter {
     return this.rpc('deleteMany', args)
   }
 
+  // --- Relationships ---
+
+  async relate(args: {
+    ns: string
+    from: string
+    to: string
+    path: string
+    sort?: number
+    meta?: Record<string, unknown>
+  }): Promise<Sqid> {
+    return this.rpc('relate', args)
+  }
+
+  async related(args: {
+    ns?: string
+    id: string
+    path?: string
+    direction?: 'from' | 'to'
+  }): Promise<Array<{ id: Sqid; path: string }>> {
+    return this.rpc('related', args)
+  }
+
   // --- Extended operations ---
 
   async checkSchema(): Promise<boolean> {

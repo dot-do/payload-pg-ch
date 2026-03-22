@@ -53,6 +53,24 @@ export interface IDocumentAdapter {
     meta?: RequestMeta
   }): Promise<{ deleted: number }>
 
+  // --- Relationships ---
+
+  relate(args: {
+    ns: string
+    from: string
+    to: string
+    path: string
+    sort?: number
+    meta?: Record<string, unknown>
+  }): Promise<Sqid>
+
+  related(args: {
+    ns?: string
+    id: string
+    path?: string
+    direction?: 'from' | 'to'
+  }): Promise<Array<{ id: Sqid; path: string }>>
+
   // --- Extended operations (used by Payload bridge) ---
 
   /** Check if the schema is ready */

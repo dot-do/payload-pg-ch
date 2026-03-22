@@ -556,6 +556,7 @@ export class DocumentAdapter {
     to: string
     path: string
     sort?: number
+    meta?: Record<string, unknown>
   }): Promise<Sqid> {
     const fromDecoded = fromSqid(args.from)
     const toDecoded = fromSqid(args.to)
@@ -567,6 +568,7 @@ export class DocumentAdapter {
         to: toDecoded.seq,
         path: args.path,
         sort: args.sort,
+        meta: args.meta,
       })
       return `rel_${rel.seq}` as Sqid
     })
@@ -590,7 +592,7 @@ export class DocumentAdapter {
       const targetSeq = dir === 'from' ? rel.to : rel.from
       const target = await findOneData(this.pool, { ns: rel.ns, seq: targetSeq })
       if (target) {
-        results.push({ id: this.rowToSqid(target), path: rel.path ?? '' })
+        results.push({ id: this.rowToSqid(target), path: rel.path })
       }
     }
     return results
@@ -856,7 +858,7 @@ function relsToDoc(
   const grouped = new Map<string, RelWithTarget[]>()
 
   for (const rel of rels) {
-    const path = rel.path ?? ''
+    const path = rel.path
     const basePath = path.replace(/\.\d+$/, '')
     if (!grouped.has(basePath)) grouped.set(basePath, [])
     grouped.get(basePath)!.push(rel)

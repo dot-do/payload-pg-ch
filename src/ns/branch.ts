@@ -82,15 +82,24 @@ export async function mergeBranch(
       const parentSeq = rowMeta?._parent as number | undefined
 
       if (parentSeq) {
-        // Update existing parent document
+        // Update existing parent document (all promoted columns + data)
         await query(
           tx,
-          `UPDATE data SET data = $1, version = version + 1, updated = now() WHERE ns = $2 AND seq = $3`,
-          [JSON.stringify(rowData), parentNs, parentSeq],
+          `UPDATE data SET data = $1, name = $4, slug = $5, mdx = $6, code = $7,
+           status = $8, locale = $9, meta = $10, embedding = $11,
+           version = version + 1, updated = now()
+           WHERE ns = $2 AND seq = $3`,
+          [
+            JSON.stringify(rowData), parentNs, parentSeq,
+            row.name, row.slug, row.mdx, row.code,
+            row.status, row.locale,
+            row.meta ? JSON.stringify(typeof row.meta === 'object' ? row.meta : {}) : '{}',
+            row.embedding,
+          ],
         )
         // Copy rels from branch to parent (replace old parent rels)
         await query(tx, `DELETE FROM rels WHERE ns = $1 AND "from" = $2`, [parentNs, parentSeq])
-        const branchRels = await query<{ to: number; path: string | null; sort: number; meta: unknown }>(
+        const branchRels = await query<{ to: number; path: string; sort: number; meta: unknown }>(
           tx,
           `SELECT "to", path, sort, meta FROM rels WHERE ns = $1 AND "from" = $2`,
           [branchNs, row.seq],
@@ -118,7 +127,7 @@ export async function mergeBranch(
           ],
         )
         // Copy rels from branch to parent for new doc
-        const branchRels = await query<{ to: number; path: string | null; sort: number; meta: unknown }>(
+        const branchRels = await query<{ to: number; path: string; sort: number; meta: unknown }>(
           tx,
           `SELECT "to", path, sort, meta FROM rels WHERE ns = $1 AND "from" = $2`,
           [branchNs, row.seq],

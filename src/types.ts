@@ -26,7 +26,7 @@ export interface RelRow {
   ns: string
   from: number
   to: number
-  path: string | null
+  path: string
   sort: number
   meta: unknown
 }
